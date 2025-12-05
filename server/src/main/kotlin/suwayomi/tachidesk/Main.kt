@@ -18,12 +18,18 @@ fun main() {
 
     // --- Start OCR Server Sidecar ---
     thread(start = true, name = "OCR-Startup") {
-        // Use a persistent directory so the binary isn't re-extracted unnecessarily if you add logic for that
-        // System.getProperty("user.dir") usually points to where Suwayomi is running
-        val ocrDir = File(System.getProperty("user.dir"), "ocr-server")
-        val ocrPort = 3000 // Or read from config if possible
-        
-        OcrServerProcess(ocrDir, ocrPort).start()
+        try {
+            // FIX: Use user.home instead of user.dir to ensure we have write permissions.
+            // This creates a folder ~/.suwayomi-ocr/ to store the binary.
+            val homeDir = System.getProperty("user.home")
+            val ocrDir = File(homeDir, ".suwayomi-ocr")
+            
+            val ocrPort = 3000 
+            
+            OcrServerProcess(ocrDir, ocrPort).start()
+        } catch (e: Exception) {
+            org.slf4j.LoggerFactory.getLogger("Main").error("Failed to init OCR", e)
+        }
     }
     // --------------------------------
 

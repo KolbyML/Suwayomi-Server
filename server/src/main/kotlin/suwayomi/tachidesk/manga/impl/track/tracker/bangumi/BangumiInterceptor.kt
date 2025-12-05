@@ -37,7 +37,7 @@ class BangumiInterceptor(
             .newBuilder()
             .header(
                 "User-Agent",
-                "Suwayomi/Suwayomi-Server/${BuildConfig.VERSION} (${BuildConfig.GITHUB})",
+                "KolbyML/Suwayomi-Server/${BuildConfig.VERSION} (${BuildConfig.GITHUB})",
             ).apply {
                 addHeader("Authorization", "Bearer ${currAuth.accessToken}")
             }.build()

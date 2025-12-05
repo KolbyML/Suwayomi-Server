@@ -381,7 +381,7 @@ fun applicationSetup() {
     }
 
     // fixes #119 , ref:
-    // https://github.com/Suwayomi/Suwayomi-Server/issues/119#issuecomment-894681292 , source Id
+    // https://github.com/KolbyML/Suwayomi-Server/issues/119#issuecomment-894681292 , source Id
     // calculation depends on String.lowercase()
     Locale.setDefault(Locale.ENGLISH)
 

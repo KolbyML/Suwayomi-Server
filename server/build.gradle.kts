@@ -157,7 +157,7 @@ buildConfig {
 
     buildConfigField("String", "WEBUI_TAG", quoteWrap(webUIRevisionTag))
 
-    buildConfigField("String", "GITHUB", quoteWrap("https://github.com/Suwayomi/Suwayomi-Server"))
+    buildConfigField("String", "GITHUB", quoteWrap("https://github.com/KolbyML/Suwayomi-Server"))
     buildConfigField("String", "DISCORD", quoteWrap("https://discord.gg/DDZdqZWaHA"))
 }
 
@@ -202,7 +202,7 @@ tasks {
     }
 
     register<Download>("downloadWebUI") {
-        src("https://github.com/Suwayomi/Suwayomi-WebUI-preview/releases/download/$webUIRevisionTag/Suwayomi-WebUI-$webUIRevisionTag.zip")
+        src("https://github.com/KolbyML/Suwayomi-WebUI/releases/download/$webUIRevisionTag/Suwayomi-WebUI-$webUIRevisionTag.zip")
         dest("src/main/resources/WebUI.zip")
 
         fun shouldOverwrite(): Boolean {

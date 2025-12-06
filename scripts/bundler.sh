@@ -218,13 +218,13 @@ make_linux_bundle() {
 }
 
 make_macos_app_bundle() {
-  local arch="$1"
+local arch="$1"
   local app_name="Suwayomi-Server.app"
   local bundle_root="$RELEASE_NAME/$app_name"
 
   if [ "${CI:-}" = true ]; then
     sudo apt update
-    sudo apt install -y icnsutils
+    sudo apt install -y icnsutils imagemagick
   fi
 
   mkdir -p "$bundle_root/Contents/MacOS"
@@ -242,9 +242,7 @@ make_macos_app_bundle() {
   
   cat > "$launcher" <<EOF
 #!/bin/bash
-# Get the absolute path to the bundle executable directory
 DIR="\$(cd "\$(dirname "\$0")"; pwd)"
-# Run Java from inside the bundle
 "\$DIR/jre/bin/java" -Xdock:name="Suwayomi Server" -jar "\$DIR/../Resources/Suwayomi-Server.jar"
 EOF
   
@@ -282,14 +280,32 @@ EOF
       error $LINENO "Source icon not found at $source_icon. Cannot build macOS bundle."
   fi
 
-  if ! command -v png2icns &> /dev/null; then
-      error $LINENO "'png2icns' tool is missing. Please install 'icnsutils'."
+  if ! command -v png2icns &> /dev/null || ! command -v convert &> /dev/null; then
+      error $LINENO "'png2icns' or 'convert' tool is missing. Please install 'icnsutils' and 'imagemagick'."
   fi
 
-  echo "Generating $dest_icon from $source_icon..."
-  png2icns "$dest_icon" "$source_icon" || error $LINENO "Failed to generate ICNS icon."
+  echo "Generating standard icon sizes from $source_icon..."
+  
+  local tmp_icon_dir="$RELEASE_NAME/tmp_icons"
+  mkdir -p "$tmp_icon_dir"
 
-  ln -s /Applications "Drag $app_name onto this shortcut to put into Applications folder"
+  convert "$source_icon" -resize 512x512 "$tmp_icon_dir/icon_512.png" || error $LINENO "Failed to resize icon 512"
+  convert "$source_icon" -resize 256x256 "$tmp_icon_dir/icon_256.png" || error $LINENO "Failed to resize icon 256"
+  convert "$source_icon" -resize 128x128 "$tmp_icon_dir/icon_128.png" || error $LINENO "Failed to resize icon 128"
+  convert "$source_icon" -resize 32x32   "$tmp_icon_dir/icon_32.png"  || error $LINENO "Failed to resize icon 32"
+  convert "$source_icon" -resize 16x16   "$tmp_icon_dir/icon_16.png"  || error $LINENO "Failed to resize icon 16"
+
+  echo "Packing icons into ICNS..."
+  png2icns "$dest_icon" \
+    "$tmp_icon_dir/icon_512.png" \
+    "$tmp_icon_dir/icon_256.png" \
+    "$tmp_icon_dir/icon_128.png" \
+    "$tmp_icon_dir/icon_32.png" \
+    "$tmp_icon_dir/icon_16.png" || error $LINENO "Failed to generate ICNS icon."
+
+  rm -rf "$tmp_icon_dir"
+
+  ln -s /Applications "$RELEASE_NAME/ Drag $app_name onto this shortcut to put into Applications folder"
 
   tar -I "gzip -9" -cvf "$RELEASE" "$RELEASE_NAME/"
 }

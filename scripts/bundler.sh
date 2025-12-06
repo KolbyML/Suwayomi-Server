@@ -97,7 +97,7 @@ main() {
       tree "$RELEASE_NAME"
 
       RELEASE="$RELEASE_NAME.dmg"
-      make_macos_dmg
+      make_macos_app_bundle "x64"
       move_release_to_output_dir
       ;;
     macOS-arm64)
@@ -112,7 +112,7 @@ main() {
       tree "$RELEASE_NAME"
 
       RELEASE="$RELEASE_NAME.dmg"
-      make_macos_dmg
+      make_macos_app_bundle "arm64"
       move_release_to_output_dir
       ;;
     windows-x64)
@@ -217,21 +217,71 @@ make_linux_bundle() {
   tar -I "gzip -9" -cvf "$RELEASE" "$RELEASE_NAME/"
 }
 
-make_macos_dmg() {
+make_macos_app_bundle() {
+  local arch="$1"
+  local app_name="Suwayomi-Server.app"
+  local bundle_root="$RELEASE_NAME/$app_name"
+
+  mkdir -p "$bundle_root/Contents/MacOS"
+  mkdir -p "$bundle_root/Contents/Resources"
+
+  cp "$JAR" "$bundle_root/Contents/Resources/Suwayomi-Server.jar"
+  
+  mv "$RELEASE_NAME/jre" "$bundle_root/Contents/MacOS/jre"
+  
+  if [ -d "$RELEASE_NAME/natives" ]; then
+    mv "$RELEASE_NAME/natives" "$bundle_root/Contents/MacOS/"
+  fi
+
+  local launcher="$bundle_root/Contents/MacOS/launcher"
+  
+  cat > "$launcher" <<EOF
+#!/bin/bash
+# Get the absolute path to the bundle executable directory
+DIR="\$(cd "\$(dirname "\$0")"; pwd)"
+# Run Java from inside the bundle
+"\$DIR/jre/bin/java" -Xdock:name="Suwayomi Server" -jar "\$DIR/../Resources/Suwayomi-Server.jar"
+EOF
+  
+  chmod +x "$launcher"
+
+  cat > "$bundle_root/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>launcher</string>
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.suwayomi.server</string>
+    <key>CFBundleName</key>
+    <string>Suwayomi Server</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$RELEASE_VERSION</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.10</string>
+</dict>
+</plist>
+EOF
+
+  if [ -f "server/src/main/resources/icon/faviconlogo.icns" ]; then
+      cp "server/src/main/resources/icon/faviconlogo.icns" "$bundle_root/Contents/Resources/icon.icns"
+  else
+      echo "Warning: No .icns file found."
+  fi
+
+  ln -s /Applications "$RELEASE_NAME/ ➡️ Drag to Applications"
+
   if [ "${CI:-}" = true ]; then
     sudo apt update
     sudo apt install -y genisoimage
   fi
 
-  mkdir "$RELEASE_NAME/bin"
-  cp "$JAR" "$RELEASE_NAME/bin/Suwayomi-Server.jar"
-  cp "scripts/resources/Suwayomi Launcher.command" "$RELEASE_NAME/"
-  chmod +x "$RELEASE_NAME/Suwayomi Launcher.command"
-
-  # Add Applications symlink so user can drag-and-drop
-  ln -s /Applications "$RELEASE_NAME/Applications"
-  genisoimage -V "Suwayomi" -D -R -apple -no-pad -o "$RELEASE" "$RELEASE_NAME"
-
+  genisoimage -V "Suwayomi Installer" -D -R -apple -no-pad -o "$RELEASE" "$RELEASE_NAME"
 }
 
 # https://wiki.debian.org/SimplePackagingTutorial

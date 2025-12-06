@@ -96,7 +96,7 @@ main() {
       setup_jre
       tree "$RELEASE_NAME"
 
-      RELEASE="$RELEASE_NAME.dmg"
+      RELEASE="$RELEASE_NAME.tar.gz"
       make_macos_app_bundle "x64"
       move_release_to_output_dir
       ;;
@@ -111,7 +111,7 @@ main() {
       setup_jre
       tree "$RELEASE_NAME"
 
-      RELEASE="$RELEASE_NAME.dmg"
+      RELEASE="$RELEASE_NAME.tar.gz"
       make_macos_app_bundle "arm64"
       move_release_to_output_dir
       ;;
@@ -224,7 +224,7 @@ make_macos_app_bundle() {
 
   if [ "${CI:-}" = true ]; then
     sudo apt update
-    sudo apt install -y icnsutils genisoimage
+    sudo apt install -y icnsutils
   fi
 
   mkdir -p "$bundle_root/Contents/MacOS"
@@ -289,9 +289,9 @@ EOF
      echo "WARNING: Source icon not found at $source_icon"
   fi
 
-  ln -s /Applications "$RELEASE_NAME/ ➡️ Drag to Applications"
+  ln -s /Applications "Drag $app_name onto this shortcut to put into Applications folder"
 
-  genisoimage -V "Suwayomi Installer" -D -R -apple -no-pad -o "$RELEASE" "$RELEASE_NAME"
+  tar -I "gzip -9" -cvf "$RELEASE" "$RELEASE_NAME/"
 }
 
 # https://wiki.debian.org/SimplePackagingTutorial

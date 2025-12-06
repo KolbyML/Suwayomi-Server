@@ -12,6 +12,7 @@ import gg.jte.TemplateEngine
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.javalin.Javalin
 import io.javalin.apibuilder.ApiBuilder.after
+import io.javalin.apibuilder.ApiBuilder.before
 import io.javalin.apibuilder.ApiBuilder.path
 import io.javalin.http.Context
 import io.javalin.http.HandlerType
@@ -41,18 +42,28 @@ import suwayomi.tachidesk.server.user.getUserFromWsContext
 import suwayomi.tachidesk.server.util.Browser
 import suwayomi.tachidesk.server.util.ServerSubpath
 import suwayomi.tachidesk.server.util.WebInterfaceManager
+import suwayomi.tachidesk.server.serverConfig
 import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
+import java.net.http.HttpClient  
+import java.net.http.HttpRequest 
+import java.net.http.HttpResponse
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import kotlin.concurrent.thread
 import kotlin.time.Duration.Companion.days
+import kotlin.text.substringAfter
 
 object JavalinSetup {
     private val logger = KotlinLogging.logger {}
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    
+    // HTTP Client and Port for Proxying OCR requests
+    private val httpClient = HttpClient.newBuilder().build()
+    // NOTE: This port must match the one used in Main.kt for OcrServerProcess
+    const val OCR_PORT = 3000
 
     fun <T> future(block: suspend CoroutineScope.() -> T): CompletableFuture<T> = scope.future(block = block)
 
@@ -110,6 +121,15 @@ object JavalinSetup {
                             GlobalAPI.defineEndpoints()
                             MangaAPI.defineEndpoints()
                         }
+
+                        // --- OCR Proxy Route ---
+                        path("ocr") {
+                            // Captures any method (GET, POST, etc.) sent to /api/ocr/*
+                            before("*") { ctx ->
+                                proxyOcrRequest(ctx)
+                            }
+                        }
+                        // -----------------------
 
                         OpdsAPI.defineEndpoints()
                         GraphQL.defineEndpoints()
@@ -273,6 +293,72 @@ object JavalinSetup {
         }
 
         app.start()
+    }
+
+    // Proxies requests from /api/ocr/* to the internal OCR process running on localhost:OCR_PORT.
+    private fun proxyOcrRequest(ctx: Context) {
+        try {
+            val prefix = "/api/ocr"
+            val requestPath = ctx.path()
+
+            // Reliably extracts the path *after* the mounting point
+            val relativePath = requestPath.substringAfter(prefix, "/")
+
+            val targetUrl = "http://127.0.0.1:$OCR_PORT$relativePath" +
+                    (if (ctx.queryString() != null) "?${ctx.queryString()}" else "")
+
+            val requestBuilder = HttpRequest.newBuilder().uri(URI.create(targetUrl))
+
+            // Determine BodyPublisher based on method
+            val bodyPublisher = when (ctx.method()) {
+                // For POST/PUT, stream the request body directly
+                HandlerType.POST, HandlerType.PUT -> HttpRequest.BodyPublishers.ofInputStream { ctx.req().inputStream }
+                else -> HttpRequest.BodyPublishers.noBody()
+            }
+            requestBuilder.method(ctx.method().name, bodyPublisher)
+
+            // Forward Headers (omitted for brevity, assume the previous header logic is here)
+            ctx.headerMap().forEach { (key, value) ->
+                if (!key.equals("Host", ignoreCase = true) && !key.equals("Content-Length", ignoreCase = true) && !key.equals("Connection", ignoreCase = true) && !key.equals("Transfer-Encoding", ignoreCase = true) && !key.equals("Expect", ignoreCase = true) && !key.equals("Upgrade", ignoreCase = true)) 
+                {
+                    requestBuilder.header(key, value)
+                }
+            }
+            
+            // Use ofByteArray() handler for simple, non-streaming response handling
+            val response = try {
+                httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofByteArray())
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IOException("OCR proxy request interrupted", e)
+            }
+            
+            // --- Handle Response ---
+            ctx.status(response.statusCode())
+
+            // Forward Response Headers
+            response.headers().map().forEach { (key, values) ->
+                if (!key.equals("Transfer-Encoding", ignoreCase = true) &&
+                    !key.equals("Content-Length", ignoreCase = true) &&
+                    !key.equals("Connection", ignoreCase = true))
+                {
+                    values.forEach { ctx.header(key, it) }
+                }
+            }
+
+            // Set the response body as the complete byte array.
+            ctx.result(response.body())
+            
+            // CRITICAL FIX: Skip the rest of the Javalin handlers. 
+            // This prevents the router from continuing and returning a 404.
+            ctx.skipRemainingHandlers() 
+
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to proxy OCR request" }
+            ctx.status(HttpStatus.BAD_GATEWAY)
+            ctx.result("OCR Proxy Error: ${e.message}")
+            ctx.skipRemainingHandlers() // Always terminate on error too
+        }
     }
 
     // private fun getOpenApiOptions(): OpenApiOptions {

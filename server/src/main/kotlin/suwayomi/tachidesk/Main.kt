@@ -8,6 +8,7 @@ package suwayomi.tachidesk
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import suwayomi.tachidesk.server.JavalinSetup.javalinSetup
+import suwayomi.tachidesk.server.JavalinSetup.OCR_PORT
 import suwayomi.tachidesk.server.applicationSetup
 import suwayomi.tachidesk.server.ocr.OcrServerProcess
 import java.io.File
@@ -24,9 +25,7 @@ fun main() {
             val homeDir = System.getProperty("user.home")
             val ocrDir = File(homeDir, ".suwayomi-ocr")
             
-            val ocrPort = 3000 
-            
-            OcrServerProcess(ocrDir, ocrPort).start()
+            OcrServerProcess(ocrDir, OCR_PORT).start()
         } catch (e: Exception) {
             org.slf4j.LoggerFactory.getLogger("Main").error("Failed to init OCR", e)
         }

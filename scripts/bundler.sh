@@ -96,8 +96,8 @@ main() {
       setup_jre
       tree "$RELEASE_NAME"
 
-      RELEASE="$RELEASE_NAME.tar.gz"
-      make_macos_bundle
+      RELEASE="$RELEASE_NAME.dmg"
+      make_macos_dmg
       move_release_to_output_dir
       ;;
     macOS-arm64)
@@ -111,8 +111,8 @@ main() {
       setup_jre
       tree "$RELEASE_NAME"
 
-      RELEASE="$RELEASE_NAME.tar.gz"
-      make_macos_bundle
+      RELEASE="$RELEASE_NAME.dmg"
+      make_macos_dmg
       move_release_to_output_dir
       ;;
     windows-x64)
@@ -217,12 +217,21 @@ make_linux_bundle() {
   tar -I "gzip -9" -cvf "$RELEASE" "$RELEASE_NAME/"
 }
 
-make_macos_bundle() {
+make_macos_dmg() {
+  if [ "${CI:-}" = true ]; then
+    sudo apt update
+    sudo apt install -y genisoimage
+  fi
+
   mkdir "$RELEASE_NAME/bin"
   cp "$JAR" "$RELEASE_NAME/bin/Suwayomi-Server.jar"
   cp "scripts/resources/Suwayomi Launcher.command" "$RELEASE_NAME/"
+  chmod +x "$RELEASE_NAME/Suwayomi Launcher.command"
 
-  tar -I "gzip -9" -cvf "$RELEASE" "$RELEASE_NAME/"
+  # Add Applications symlink so user can drag-and-drop
+  ln -s /Applications "$RELEASE_NAME/Applications"
+  genisoimage -V "Suwayomi" -D -R -apple -no-pad -o "$RELEASE" "$RELEASE_NAME"
+
 }
 
 # https://wiki.debian.org/SimplePackagingTutorial

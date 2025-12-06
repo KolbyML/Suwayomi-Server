@@ -278,22 +278,21 @@ EOF
   local source_icon="server/src/main/resources/icon/faviconlogo.png"
   local dest_icon="$bundle_root/Contents/Resources/icon.icns"
 
-  if [ -f "$source_icon" ]; then
-     if command -v png2icns &> /dev/null; then
-         png2icns "$dest_icon" "$source_icon"
-     else 
-         echo "WARNING: 'png2icns' not found. App will have generic icon."
-         echo "To fix: sudo apt install icnsutils"
-     fi
-  else
-     echo "WARNING: Source icon not found at $source_icon"
+  if [ ! -f "$source_icon" ]; then
+      error $LINENO "Source icon not found at $source_icon. Cannot build macOS bundle."
   fi
 
-  ln -s /Applications "Drag $app_name onto this shortcut to put into Applications folder"
+  if ! command -v png2icns &> /dev/null; then
+      error $LINENO "'png2icns' tool is missing. Please install 'icnsutils'."
+  fi
+
+  echo "Generating $dest_icon from $source_icon..."
+  png2icns "$dest_icon" "$source_icon" || error $LINENO "Failed to generate ICNS icon."
+
+  ln -s /Applications "$RELEASE_NAME/ ➡️ Drag to Applications"
 
   tar -I "gzip -9" -cvf "$RELEASE" "$RELEASE_NAME/"
 }
-
 # https://wiki.debian.org/SimplePackagingTutorial
 # https://www.debian.org/doc/manuals/packaging-tutorial/packaging-tutorial.pdf
 make_deb_package() {

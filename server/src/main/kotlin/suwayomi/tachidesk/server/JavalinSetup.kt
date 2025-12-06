@@ -63,7 +63,7 @@ object JavalinSetup {
     // HTTP Client and Port for Proxying OCR requests
     private val httpClient = HttpClient.newBuilder().build()
     // NOTE: This port must match the one used in Main.kt for OcrServerProcess
-    const val OCR_PORT = 3000
+    const val OCR_PORT = 3033
 
     fun <T> future(block: suspend CoroutineScope.() -> T): CompletableFuture<T> = scope.future(block = block)
 

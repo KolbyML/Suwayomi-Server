@@ -201,6 +201,11 @@ tasks {
         mustRunAfter("downloadWebUI")
     }
 
+    named<JavaExec>("run") {
+        val webUiEnabled = project.findProperty("webUIEnabled") as String? ?: "true"
+        jvmArgs("-Dsuwayomi.tachidesk.config.server.webUIEnabled=$webUiEnabled")
+    }
+
     register<Download>("downloadWebUI") {
         src("https://github.com/KolbyML/Suwayomi-WebUI/releases/download/$webUIRevisionTag/Suwayomi-WebUI-$webUIRevisionTag.zip")
         dest("src/main/resources/WebUI.zip")

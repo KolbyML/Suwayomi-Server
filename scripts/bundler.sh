@@ -222,6 +222,11 @@ make_macos_app_bundle() {
   local app_name="Suwayomi-Server.app"
   local bundle_root="$RELEASE_NAME/$app_name"
 
+  if [ "${CI:-}" = true ]; then
+    sudo apt update
+    sudo apt install -y icnsutils genisoimage
+  fi
+
   mkdir -p "$bundle_root/Contents/MacOS"
   mkdir -p "$bundle_root/Contents/Resources"
 
@@ -264,22 +269,27 @@ EOF
     <string>$RELEASE_VERSION</string>
     <key>LSMinimumSystemVersion</key>
     <string>10.10</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
 </dict>
 </plist>
 EOF
 
-  if [ -f "server/src/main/resources/icon/faviconlogo.icns" ]; then
-      cp "server/src/main/resources/icon/faviconlogo.icns" "$bundle_root/Contents/Resources/icon.icns"
+  local source_icon="server/src/main/resources/icon/faviconlogo.png"
+  local dest_icon="$bundle_root/Contents/Resources/icon.icns"
+
+  if [ -f "$source_icon" ]; then
+     if command -v png2icns &> /dev/null; then
+         png2icns "$dest_icon" "$source_icon"
+     else 
+         echo "WARNING: 'png2icns' not found. App will have generic icon."
+         echo "To fix: sudo apt install icnsutils"
+     fi
   else
-      echo "Warning: No .icns file found."
+     echo "WARNING: Source icon not found at $source_icon"
   fi
 
   ln -s /Applications "$RELEASE_NAME/ ➡️ Drag to Applications"
-
-  if [ "${CI:-}" = true ]; then
-    sudo apt update
-    sudo apt install -y genisoimage
-  fi
 
   genisoimage -V "Suwayomi Installer" -D -R -apple -no-pad -o "$RELEASE" "$RELEASE_NAME"
 }

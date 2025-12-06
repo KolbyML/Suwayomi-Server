@@ -289,10 +289,11 @@ EOF
   echo "Generating $dest_icon from $source_icon..."
   png2icns "$dest_icon" "$source_icon" || error $LINENO "Failed to generate ICNS icon."
 
-  ln -s /Applications "$RELEASE_NAME/ ➡️ Drag to Applications"
+  ln -s /Applications "Drag $app_name onto this shortcut to put into Applications folder"
 
   tar -I "gzip -9" -cvf "$RELEASE" "$RELEASE_NAME/"
 }
+
 # https://wiki.debian.org/SimplePackagingTutorial
 # https://www.debian.org/doc/manuals/packaging-tutorial/packaging-tutorial.pdf
 make_deb_package() {

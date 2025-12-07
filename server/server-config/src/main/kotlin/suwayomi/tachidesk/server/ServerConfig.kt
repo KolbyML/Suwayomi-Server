@@ -186,7 +186,7 @@ class ServerConfig(
         protoNumber = 13,
         group = SettingGroup.WEB_UI,
         privacySafe = true,
-        defaultValue = WebUIChannel.STABLE,
+        defaultValue = WebUIChannel.BUNDLED,
         enumClass = WebUIChannel::class,
         typeInfo = SettingsRegistry.PartialTypeInfo(imports = listOf("suwayomi.tachidesk.graphql.types.WebUIChannel")),
     )

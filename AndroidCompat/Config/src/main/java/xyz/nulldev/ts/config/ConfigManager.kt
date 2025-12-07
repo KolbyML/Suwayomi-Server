@@ -19,6 +19,7 @@ import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import com.typesafe.config.ConfigValueFactory
 
 /**
  * Manages app config.
@@ -153,13 +154,18 @@ open class ConfigManager {
         val hasMissingSettings = refKeys.any { !userConfig.hasPath(it) }
         val hasOutdatedSettings = userConfig.entrySet().any { !refKeys.contains(it.key) && it.key.count { c -> c == '.' } <= 1 }
 
-        val isUserConfigOutdated = hasMissingSettings || hasOutdatedSettings
+        // --- CUSTOM CHECK: Check if we need to force migrate 'Stable' to 'BUNDLED' ---
+        val needsChannelMigration = internalConfig.hasPath("server.webUIChannel") &&
+            internalConfig.getString("server.webUIChannel").equals("Stable", ignoreCase = true)
+
+        val isUserConfigOutdated = hasMissingSettings || hasOutdatedSettings || needsChannelMigration
+
         if (!isUserConfigOutdated) {
             return
         }
 
         logger.debug {
-            "user config is out of date, updating... (missingSettings= $hasMissingSettings, outdatedSettings= $hasOutdatedSettings)"
+            "user config is out of date, updating... (missingSettings= $hasMissingSettings, outdatedSettings= $hasOutdatedSettings, channelMigration= $needsChannelMigration)"
         }
 
         var newUserConfigDoc: ConfigDocument = createConfigDocumentFromReference()
@@ -174,6 +180,14 @@ open class ConfigManager {
 
         newUserConfigDoc =
             migrate(newUserConfigDoc, internalConfig)
+
+        // --- FORCE MIGRATION LOGIC ---
+        if (needsChannelMigration) {
+            newUserConfigDoc = newUserConfigDoc.withValue(
+                "server.webUIChannel",
+                ConfigValueFactory.fromAnyRef("BUNDLED")
+            )
+        }
 
         userConfigFile.writeText(newUserConfigDoc.render())
         getUserConfig().entrySet().forEach { internalConfig = internalConfig.withValue(it.key, it.value) }

@@ -7,8 +7,6 @@ package suwayomi.tachidesk.server
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import gg.jte.ContentType
-import gg.jte.TemplateEngine
 import eu.kanade.tachiyomi.network.HttpException
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.javalin.Javalin
@@ -18,9 +16,7 @@ import io.javalin.http.Context
 import io.javalin.http.HandlerType
 import io.javalin.http.HttpStatus
 import io.javalin.http.NotFoundResponse
-import io.javalin.http.RedirectResponse
 import io.javalin.http.UnauthorizedResponse
-import io.javalin.rendering.template.JavalinJte
 import io.javalin.websocket.WsContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,28 +26,17 @@ import kotlinx.coroutines.future.future
 import org.eclipse.jetty.server.Connector
 import org.eclipse.jetty.server.ServerConnector
 import org.eclipse.jetty.util.thread.QueuedThreadPool
-import suwayomi.tachidesk.global.GlobalAPI
-import suwayomi.tachidesk.graphql.GraphQL
-import suwayomi.tachidesk.graphql.types.AuthMode
-import suwayomi.tachidesk.i18n.LocalizationHelper
-import suwayomi.tachidesk.manga.MangaAPI
-import suwayomi.tachidesk.opds.OpdsAPI
+import suwayomi.tachidesk.server.types.AuthMode
 import suwayomi.tachidesk.server.plugin.ServerPluginRegistry
 import suwayomi.tachidesk.server.user.ForbiddenException
 import suwayomi.tachidesk.server.user.UnauthorizedException
 import suwayomi.tachidesk.server.user.UserType
 import suwayomi.tachidesk.server.user.getUserFromContext
 import suwayomi.tachidesk.server.user.getUserFromWsContext
-import suwayomi.tachidesk.server.util.Browser
 import suwayomi.tachidesk.server.util.ServerSubpath
-import suwayomi.tachidesk.server.util.WebInterfaceManager
 import java.io.IOException
-import java.net.URI
-import java.net.URLEncoder
-import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import kotlin.concurrent.thread
-import kotlin.time.Duration.Companion.days
 
 object JavalinSetup {
     private val logger = KotlinLogging.logger {}
@@ -92,13 +77,7 @@ object JavalinSetup {
 
         val app =
             Javalin.create { config ->
-                val templateEngine = TemplateEngine.createPrecompiled(ContentType.Html)
-                config.fileRenderer(JavalinJte(templateEngine))
                 config.jetty.threadPool = QueuedThreadPool(100, 8, 60_000).apply { name = "JettyServerThreadPool" }
-
-                WebInterfaceManager.setup(config)
-
-                // config.registerPlugin(OpenApiPlugin(getOpenApiOptions()))
 
                 var connectorAdded = false
                 config.jetty.modifyServer { server ->
@@ -138,32 +117,7 @@ object JavalinSetup {
                     }
                 }
 
-                val runtimeOnly = RuntimeMode.isRuntimeOnly()
-
                 config.router.apiBuilder {
-                    path(ServerSubpath.maybeAddAsPrefix("api/")) {
-                        path("v1/") {
-                            if (!runtimeOnly) {
-                                GlobalAPI.defineEndpoints()
-                                MangaAPI.defineEndpoints()
-                                ServerPluginRegistry.defineApiV1Routes()
-                            }
-                        }
-
-                        if (!runtimeOnly) {
-                            OpdsAPI.defineEndpoints()
-                            GraphQL.defineEndpoints()
-                        }
-
-                        after { ctx ->
-                            // If not matched, the request was for an invalid endpoint
-                            // Return a 404 instead of redirecting to the UI for usability
-                            if (ctx.endpointHandlerPath() == "*") {
-                                throw NotFoundResponse()
-                            }
-                        }
-                    }
-
                     path(ServerSubpath.maybeAddAsPrefix("runtime/")) {
                         path("v1/") {
                             ServerPluginRegistry.defineRuntimeV1Routes()
@@ -178,68 +132,10 @@ object JavalinSetup {
                 }
             }
 
-        val loginPath = ServerSubpath.maybeAddAsPrefix("/login.html")
-
-        app.get(loginPath) { ctx ->
-            val locale: Locale = LocalizationHelper.ctxToLocale(ctx)
-            ctx.header("content-type", "text/html")
-            val httpCacheSeconds = 1.days.inWholeSeconds
-            ctx.header("cache-control", "max-age=$httpCacheSeconds")
-            ctx.render(
-                "Login.jte",
-                mapOf(
-                    "locale" to locale,
-                    "error" to "",
-                ),
-            )
-        }
-
-        app.post(loginPath) { ctx ->
-            val username = ctx.formParam("user")
-            val password = ctx.formParam("pass")
-            val isValid =
-                username == serverConfig.authUsername.value &&
-                    password == serverConfig.authPassword.value
-
-            if (isValid) {
-                val redirect = ctx.queryParam("redirect") ?: ServerSubpath.maybeAddAsPrefix("/")
-                val uri = URI(redirect)
-                if (uri.host != null || uri.scheme != null) {
-                    throw IllegalArgumentException("Given redirect is not relative, refusing")
-                }
-                // NOTE: We currently have no session handler attached.
-                // Thus, all sessions are stored in memory and not persisted.
-                // Furthermore, default session timeout appears to be 30m
-                ctx.header("Location", redirect)
-                ctx.sessionAttribute("logged-in", username)
-                throw RedirectResponse(HttpStatus.SEE_OTHER)
-            }
-
-            val locale: Locale = LocalizationHelper.ctxToLocale(ctx)
-            ctx.header("content-type", "text/html")
-            ctx.req().session.invalidate()
-            ctx.render(
-                "Login.jte",
-                mapOf(
-                    "locale" to locale,
-                    "error" to "Invalid username or password",
-                ),
-            )
-        }
-
         app.beforeMatched { ctx ->
-            val isWebManifest =
-                listOf("site.webmanifest", "manifest.json", "login.html").any { ctx.path().endsWith(it) }
-            val isPageIcon =
-                ctx.path().startsWith('/') &&
-                    !ctx.path().substring(1).contains('/') &&
-                    listOf(".png", ".jpg", ".ico").any { ctx.path().endsWith(it) }
             val isPreFlight = ctx.method() == HandlerType.OPTIONS
-            val isApi =
-                ctx.path().startsWith(ServerSubpath.maybeAddAsPrefix("/api/")) ||
-                    ctx.path().startsWith(ServerSubpath.maybeAddAsPrefix("/runtime/"))
 
-            val requiresAuthentication = !isPreFlight && !isPageIcon && !isWebManifest
+            val requiresAuthentication = !isPreFlight
             if (!requiresAuthentication) {
                 return@beforeMatched
             }
@@ -258,13 +154,6 @@ object JavalinSetup {
                 return username == serverConfig.authUsername.value
             }
 
-            if (authMode == AuthMode.SIMPLE_LOGIN && !cookieValid() && !isApi) {
-                val url =
-                    "$loginPath?redirect=" + URLEncoder.encode(ctx.path() + (ctx.queryString()?.let { "?" + it } ?: ""), Charsets.UTF_8)
-                ctx.header("Location", url)
-                throw RedirectResponse(HttpStatus.SEE_OTHER)
-            }
-
             if (authMode == AuthMode.BASIC_AUTH && !credentialsValid()) {
                 ctx.header("WWW-Authenticate", "Basic")
                 throw UnauthorizedResponse()
@@ -272,14 +161,6 @@ object JavalinSetup {
 
             ctx.setAttribute(Attribute.TachideskUser, getUserFromContext(ctx))
             ctx.setAttribute(Attribute.TachideskBasic, credentialsValid())
-        }
-
-        app.events { event ->
-            event.serverStarted {
-                if (serverConfig.initialOpenInBrowserEnabled.value) {
-                    Browser.openInBrowser()
-                }
-            }
         }
 
         app.wsBefore {

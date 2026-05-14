@@ -9,7 +9,7 @@ import okhttp3.Headers
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
-import suwayomi.tachidesk.graphql.types.DownloadConversion
+import suwayomi.tachidesk.server.types.DownloadConversion
 import suwayomi.tachidesk.manga.impl.util.storage.ImageUtil
 import uy.kohesive.injekt.injectLazy
 import java.awt.image.BufferedImage

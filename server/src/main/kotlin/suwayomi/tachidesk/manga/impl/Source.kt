@@ -21,7 +21,6 @@ import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.BatchUpdateStatement
 import org.jetbrains.exposed.sql.transactions.transaction
-import suwayomi.tachidesk.manga.impl.extension.Extension.getExtensionIconUrl
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource.getCatalogueSourceOrNull
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource.getCatalogueSourceOrStub
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource.unregisterCatalogueSource
@@ -45,7 +44,7 @@ object Source {
                     id = it[SourceTable.id].value.toString(),
                     name = it[SourceTable.name],
                     lang = it[SourceTable.lang],
-                    iconUrl = getExtensionIconUrl(sourceExtension[ExtensionTable.apkName]),
+                    iconUrl = sourceExtension[ExtensionTable.iconUrl],
                     supportsLatest = catalogueSource.supportsLatest,
                     isConfigurable = catalogueSource is ConfigurableSource,
                     isNsfw = it[SourceTable.isNsfw],
@@ -69,10 +68,7 @@ object Source {
                 id = sourceId.toString(),
                 name = source[SourceTable.name],
                 lang = source[SourceTable.lang],
-                iconUrl =
-                    getExtensionIconUrl(
-                        extension[ExtensionTable.apkName],
-                    ),
+                iconUrl = extension[ExtensionTable.iconUrl],
                 supportsLatest = catalogueSource.supportsLatest,
                 isConfigurable = catalogueSource is ConfigurableSource,
                 isNsfw = source[SourceTable.isNsfw],

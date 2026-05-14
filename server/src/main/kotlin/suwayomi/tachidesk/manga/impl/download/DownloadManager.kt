@@ -152,7 +152,7 @@ object DownloadManager {
     init {
         scope.launch {
             notifyFlow.sample(1.seconds).collect {
-                notifyAllClients(immediate = true, gqlEmit = true)
+                notifyAllClients(immediate = true, emitUpdates = true)
             }
         }
     }
@@ -166,7 +166,7 @@ object DownloadManager {
     private fun notifyAllClients(
         immediate: Boolean = false,
         downloads: List<DownloadUpdate> = emptyList(),
-        gqlEmit: Boolean = false,
+        emitUpdates: Boolean = false,
     ) {
         val outdatedUpdates =
             downloadUpdates.filter { update ->
@@ -182,9 +182,8 @@ object DownloadManager {
         // update the queue in the cache based on the updates).
         // This happens in case e.g., a source is broken and all its downloads error out basically immediately.
         // With each errored out download, a new one starts, which causes an immediate notification to the clients.
-        // While the immediate notification functionality is no longer needed for the latest graphql download subscription,
-        // it is still required for the deprecated version as well as the rest api subscription.
-        if (gqlEmit) {
+        // The sampled updates stream keeps fast download changes from overwhelming clients.
+        if (emitUpdates) {
             val updates = getDownloadUpdates()
 
             downloadUpdates.clear()

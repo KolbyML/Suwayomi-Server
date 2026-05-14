@@ -34,8 +34,6 @@ import org.koin.core.context.startKoin
 import org.koin.core.module.Module
 import org.koin.dsl.module
 import suwayomi.tachidesk.i18n.LocalizationHelper
-import suwayomi.tachidesk.manga.impl.backup.proto.ProtoBackupExport
-import suwayomi.tachidesk.manga.impl.download.DownloadManager
 import suwayomi.tachidesk.manga.impl.update.IUpdater
 import suwayomi.tachidesk.manga.impl.update.Updater
 import suwayomi.tachidesk.manga.impl.util.lang.renameTo
@@ -47,7 +45,6 @@ import suwayomi.tachidesk.server.settings.SettingsRegistry
 import suwayomi.tachidesk.server.util.AppMutex.handleAppMutex
 import suwayomi.tachidesk.server.util.ConfigTypeRegistration
 import suwayomi.tachidesk.server.util.ExitCode
-import suwayomi.tachidesk.server.util.SystemTray
 import suwayomi.tachidesk.server.util.shutdownApp
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
@@ -273,7 +270,6 @@ class ApplicationDirs(
     private val configuredDownloadsRoot = System.getProperty("suwayomi.tachidesk.config.server.downloadsPath").orEmpty()
     private val configuredLocalMangaRoot = System.getProperty("suwayomi.tachidesk.config.server.localSourcePath").orEmpty()
     private val configuredLocalAnimeRoot = System.getProperty("suwayomi.tachidesk.config.server.localAnimeSourcePath").orEmpty()
-    private val configuredBackupRoot = System.getProperty("suwayomi.tachidesk.config.server.backupPath").orEmpty()
 
     val extensionsRoot = "$dataRoot/extensions"
     val downloadsRoot
@@ -282,10 +278,6 @@ class ApplicationDirs(
         get() = configuredLocalMangaRoot.ifBlank { serverConfig.localSourcePath.value.ifBlank { "$dataRoot/local" } }
     val localAnimeRoot
         get() = configuredLocalAnimeRoot.ifBlank { serverConfig.localAnimeSourcePath.value.ifBlank { "$dataRoot/localanime" } }
-    val webUIRoot = "$dataRoot/webUI"
-    val webUIServe = "$tempRoot/webUI-serve"
-    val automatedBackupRoot
-        get() = configuredBackupRoot.ifBlank { serverConfig.backupPath.value.ifBlank { "$dataRoot/backups" } }
 
     val tempThumbnailCacheRoot = "$tempRoot/thumbnails"
     val tempMangaCacheRoot = "$tempRoot/manga-cache"
@@ -567,24 +559,6 @@ fun applicationSetup() {
 
         LocalSource.register()
 
-        // create system tray
-        serverConfig.subscribeTo(
-            serverConfig.systemTrayEnabled,
-            { systemTrayEnabled ->
-                try {
-                    if (systemTrayEnabled) {
-                        SystemTray.create()
-                    } else {
-                        SystemTray.remove()
-                    }
-                } catch (e: Throwable) {
-                    // cover both java.lang.Exception and java.lang.Error
-                    logger.error(e) { "Failed to create/remove SystemTray due to" }
-                }
-            },
-            ignoreInitialValue = false,
-        )
-
         runMigrations(applicationDirs)
     }
 
@@ -619,18 +593,6 @@ fun applicationSetup() {
             Security.addProvider(BouncyCastleProvider())
         }
         RuntimeStartupMetrics.logStage("crypto_provider_ready")
-    }
-
-    if (!runtimeOnly) {
-        // start automated global updates
-        val updater = Injekt.get<IUpdater>()
-        (updater as Updater).scheduleUpdateTask()
-
-        // start automated backups
-        ProtoBackupExport.scheduleAutomatedBackupTask()
-
-        // start DownloadManager and restore + resume downloads
-        DownloadManager.restoreAndResumeDownloads()
     }
 
     if (runtimeOnly) {

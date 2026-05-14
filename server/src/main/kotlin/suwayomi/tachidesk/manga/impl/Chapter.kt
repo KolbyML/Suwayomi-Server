@@ -33,7 +33,6 @@ import org.jetbrains.exposed.sql.update
 import suwayomi.tachidesk.manga.impl.Manga.getManga
 import suwayomi.tachidesk.manga.impl.download.DownloadManager
 import suwayomi.tachidesk.manga.impl.download.DownloadManager.EnqueueInput
-import suwayomi.tachidesk.manga.impl.track.Track
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource.getCatalogueSourceOrStub
 import suwayomi.tachidesk.manga.model.dataclass.ChapterDataClass
 import suwayomi.tachidesk.manga.model.dataclass.MangaChapterDataClass
@@ -482,10 +481,6 @@ object Chapter {
                 chapterIdValue
             }
 
-        if (isRead == true || markPrevRead == true) {
-            Track.asyncTrackChapter(setOf(mangaId))
-        }
-
         return chapterId
     }
 
@@ -576,17 +571,6 @@ object Chapter {
             }
         }
 
-        if (isRead == true) {
-            val mangaIds =
-                transaction {
-                    ChapterTable
-                        .selectAll()
-                        .where(condition)
-                        .map { it[ChapterTable.manga].value }
-                        .toSet()
-                }
-            Track.asyncTrackChapter(mangaIds)
-        }
     }
 
     fun getChaptersMetaMaps(chapterIds: List<Int>): Map<Int, Map<String, String>> =

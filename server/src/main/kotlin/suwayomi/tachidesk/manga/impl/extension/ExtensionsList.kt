@@ -21,7 +21,6 @@ import org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl
 import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
-import suwayomi.tachidesk.manga.impl.extension.Extension.getExtensionIconUrl
 import suwayomi.tachidesk.manga.impl.extension.github.ExtensionGithubApi
 import suwayomi.tachidesk.manga.impl.extension.github.OnlineExtension
 import suwayomi.tachidesk.manga.model.dataclass.ExtensionDataClass
@@ -99,7 +98,7 @@ object ExtensionsList {
                 ExtensionDataClass(
                     row[ExtensionTable.repo],
                     apkName,
-                    getExtensionIconUrl(apkName),
+                    row[ExtensionTable.iconUrl],
                     row[ExtensionTable.name],
                     row[ExtensionTable.pkgName],
                     row[ExtensionTable.versionName],

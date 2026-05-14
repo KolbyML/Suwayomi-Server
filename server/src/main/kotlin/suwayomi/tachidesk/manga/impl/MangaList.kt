@@ -26,8 +26,6 @@ import java.time.Instant
 object MangaList {
     private val logger = KotlinLogging.logger {}
 
-    fun proxyThumbnailUrl(mangaId: Int): String = "/api/v1/manga/$mangaId/thumbnail"
-
     suspend fun getMangaList(
         sourceId: Long,
         pageNum: Int = 1,

@@ -42,10 +42,6 @@ object ServerPluginRegistry {
         plugins.forEach { plugin -> plugin.configureNetworkClient(builder) }
     }
 
-    fun defineApiV1Routes() {
-        plugins.forEach { plugin -> plugin.defineApiV1Routes() }
-    }
-
     fun defineRuntimeV1Routes() {
         plugins.forEach { plugin -> plugin.defineRuntimeV1Routes() }
     }

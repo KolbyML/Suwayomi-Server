@@ -12,7 +12,6 @@ import eu.kanade.tachiyomi.source.model.UpdateStrategy
 import org.jetbrains.exposed.dao.id.IntIdTable
 import org.jetbrains.exposed.sql.ResultRow
 import suwayomi.tachidesk.manga.impl.Manga.getMangaMetaMap
-import suwayomi.tachidesk.manga.impl.MangaList.proxyThumbnailUrl
 import suwayomi.tachidesk.manga.model.dataclass.MangaDataClass
 import suwayomi.tachidesk.manga.model.dataclass.toGenreList
 import suwayomi.tachidesk.manga.model.table.MangaStatus.Companion
@@ -56,7 +55,7 @@ fun MangaTable.toDataClass(
     sourceId = mangaEntry[sourceReference].toString(),
     url = mangaEntry[url],
     title = mangaEntry[title],
-    thumbnailUrl = proxyThumbnailUrl(mangaEntry[this.id].value),
+    thumbnailUrl = mangaEntry[thumbnail_url],
     thumbnailUrlLastFetched = mangaEntry[thumbnailUrlLastFetched],
     initialized = mangaEntry[initialized],
     artist = mangaEntry[artist],

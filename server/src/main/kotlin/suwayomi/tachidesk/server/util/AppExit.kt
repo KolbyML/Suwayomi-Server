@@ -16,9 +16,7 @@ enum class ExitCode(
     val code: Int,
 ) {
     Success(0),
-    MutexCheckFailedTachideskRunning(1),
     MutexCheckFailedAnotherAppRunning(2),
-    WebUISetupFailure(3),
     ConfigMigrationMisconfiguredFailure(4),
     DbMigrationFailure(5),
 }

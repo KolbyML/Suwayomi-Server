@@ -19,10 +19,6 @@ dependencies {
     implementation(libs.slf4japi)
     implementation(libs.kotlinlogging)
     
-    // Serialization
-    implementation(libs.serialization.json)
-    implementation(libs.serialization.protobuf)
-    
     // Depend on server-config module for access to ServerConfig and SettingsRegistry
     implementation(projects.server.serverConfig)
 }
@@ -44,6 +40,12 @@ tasks {
         
         // Set working directory to the server module directory
         workingDir = serverProject.projectDir
+
+        doFirst {
+            delete(
+                serverProject.file("build/generated/src/main/kotlin/suwayomi/tachidesk/manga/impl/backup"),
+            )
+        }
         
         inputs.files(
             serverProject.sourceSets.main.get().allSource.filter {
@@ -54,9 +56,7 @@ tasks {
         outputs.files(
             serverProject.file("build/generated/src/main/resources/server-reference.conf"),
             serverProject.file("build/generated/src/test/resources/server-reference.conf"),
-            serverProject.file("build/generated/src/main/kotlin/suwayomi/tachidesk/graphql/types/SettingsType.kt"),
-            serverProject.file("build/generated/src/main/kotlin/suwayomi/tachidesk/manga/impl/backup/proto/models/BackupServerSettings.kt"),
-            serverProject.file("build/generated/src/main/kotlin/suwayomi/tachidesk/manga/impl/backup/proto/handlers/BackupSettingsHandler.kt"),
+            serverProject.file("build/generated/src/main/kotlin/suwayomi/tachidesk/server/types/SettingsType.kt"),
         )
     }
 }

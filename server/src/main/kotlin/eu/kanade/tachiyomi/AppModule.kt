@@ -13,13 +13,11 @@ package eu.kanade.tachiyomi
 // import eu.kanade.tachiyomi.data.download.DownloadManager
 // import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 // import eu.kanade.tachiyomi.data.sync.LibrarySyncManager
-// import eu.kanade.tachiyomi.data.track.TrackManager
 // import eu.kanade.tachiyomi.extension.ExtensionManager
 import android.app.Application
 import eu.kanade.tachiyomi.network.JavaScriptEngine
 import eu.kanade.tachiyomi.network.NetworkHelper
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.protobuf.ProtoBuf
 import nl.adaptivity.xmlutil.XmlDeclMode
 import nl.adaptivity.xmlutil.core.XmlVersion
 import nl.adaptivity.xmlutil.serialization.XML
@@ -48,8 +46,6 @@ fun createAppModule(app: Application): Module {
 //
 //        addSingletonFactory { DownloadManager(app) }
 //
-//        addSingletonFactory { TrackManager(app) }
-//
 //        addSingletonFactory { LibrarySyncManager(app) }
 
         single {
@@ -69,10 +65,6 @@ fun createAppModule(app: Application): Module {
                 indent = 2
                 xmlVersion = XmlVersion.XML10
             }
-        }
-
-        single<ProtoBuf> {
-            ProtoBuf
         }
     }
 

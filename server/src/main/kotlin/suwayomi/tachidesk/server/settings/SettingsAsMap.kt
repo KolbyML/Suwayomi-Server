@@ -1,6 +1,6 @@
 package suwayomi.tachidesk.server.settings
 
-import suwayomi.tachidesk.graphql.types.Settings
+import suwayomi.tachidesk.server.types.Settings
 import kotlin.reflect.KProperty1
 import kotlin.reflect.full.memberProperties
 
@@ -9,9 +9,6 @@ internal fun Settings.asMap(): Map<String, Any?> {
 
     this::class.memberProperties.forEach { property ->
         try {
-            // Skip the 'id' property from Node interface
-            if (property.name == "id") return@forEach
-
             @Suppress("UNCHECKED_CAST")
             val value = (property as KProperty1<Settings, *>).get(this)
             map[property.name] = value

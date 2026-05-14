@@ -1,4 +1,3 @@
-import de.undercouch.gradle.tasks.download.Download
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 import java.time.Instant
 
@@ -25,11 +24,6 @@ plugins {
             .get()
             .pluginId,
     )
-    id(
-        libs.plugins.jte
-            .get()
-            .pluginId,
-    )
 }
 
 dependencies {
@@ -45,20 +39,12 @@ dependencies {
     implementation(libs.bundles.javalin)
     implementation(libs.bundles.jackson)
 
-    // GraphQL
-    implementation(libs.graphql.kotlin.server)
-    implementation(libs.graphql.kotlin.scheme)
-    implementation(libs.graphql.java.scalars)
-
     // Exposed ORM
     implementation(libs.bundles.exposed)
     implementation(libs.sqlite.jdbc)
 
     // Exposed Migrations
     implementation(libs.exposed.migrations)
-
-    // tray icon
-    implementation(libs.bundles.systemtray)
 
     // dependencies of Mihon (Tachiyomi) extensions, some are duplicate, keeping it here for reference
     implementation(libs.injekt)
@@ -110,11 +96,6 @@ dependencies {
     // Native QuickJS runtime for evaluating extension JavaScript
     implementation(libs.quickjs.jvm)
 
-    compileOnly(libs.kte)
-}
-
-jte {
-    generate()
 }
 
 fun overlayPaths(propertyName: String): List<String> =
@@ -175,8 +156,6 @@ buildConfig {
     buildConfigField("String", "BUILD_TYPE", quoteWrap(if (System.getenv("ProductBuildType") == "Stable") "Stable" else "Preview"))
     buildConfigField("long", "BUILD_TIME", Instant.now().epochSecond.toString())
 
-    buildConfigField("String", "WEBUI_TAG", quoteWrap(webUIRevisionTag))
-
     buildConfigField("String", "GITHUB", quoteWrap("https://github.com/Suwayomi/Suwayomi-Server"))
     buildConfigField("String", "DISCORD", quoteWrap("https://discord.gg/DDZdqZWaHA"))
 }
@@ -218,50 +197,6 @@ tasks {
 
     named<Copy>("processResources") {
         duplicatesStrategy = DuplicatesStrategy.INCLUDE
-        mustRunAfter("downloadWebUI")
-    }
-
-    register<Download>("downloadWebUI") {
-        src("https://github.com/Suwayomi/Suwayomi-WebUI-preview/releases/download/$webUIRevisionTag/Suwayomi-WebUI-$webUIRevisionTag.zip")
-        dest("src/main/resources/WebUI.zip")
-
-        fun shouldOverwrite(): Boolean {
-            val zipPath = project.projectDir.absolutePath + "/src/main/resources/WebUI.zip"
-            val zipFile = net.lingala.zip4j.ZipFile(zipPath)
-
-            var shouldOverwrite = true
-            if (zipFile.isValidZipFile) {
-                val zipRevision =
-                    zipFile.getInputStream(zipFile.getFileHeader("revision")).bufferedReader().use {
-                        it.readText().trim()
-                    }
-
-                if (zipRevision == webUIRevisionTag) {
-                    shouldOverwrite = false
-                }
-            }
-
-            return shouldOverwrite
-        }
-
-        overwrite(shouldOverwrite())
-    }
-
-    register("runElectron") {
-        group = "application"
-        finalizedBy(run)
-        doFirst {
-            application.applicationDefaultJvmArgs =
-                listOf(
-                    "-Dsuwayomi.tachidesk.config.server.webUIInterface=electron",
-                    // Change this to the installed electron application
-                    "-Dsuwayomi.tachidesk.config.server.electronPath=/usr/bin/electron",
-                )
-        }
-    }
-
-    runKtlintCheckOverMainSourceSet {
-        mustRunAfter(generateJte)
     }
 
     compileKotlin {

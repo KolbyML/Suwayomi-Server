@@ -79,7 +79,8 @@ class CookieManagerImpl : CookieManager() {
             } else {
                 URI("http://$url")
             }
-        return cookieHandler().cookieStore
+        return cookieHandler()
+            .cookieStore
             .get(uri)
             .joinToString("; ") { "${it.name}=${it.value}" }
     }

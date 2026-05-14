@@ -4,7 +4,7 @@ import io.javalin.http.Context
 import io.javalin.http.Header
 import io.javalin.websocket.WsConnectContext
 import suwayomi.tachidesk.global.impl.util.Jwt
-import suwayomi.tachidesk.graphql.types.AuthMode
+import suwayomi.tachidesk.server.types.AuthMode
 import suwayomi.tachidesk.server.JavalinSetup.Attribute
 import suwayomi.tachidesk.server.JavalinSetup.getAttribute
 import suwayomi.tachidesk.server.serverConfig

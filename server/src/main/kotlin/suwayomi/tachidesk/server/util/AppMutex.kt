@@ -8,19 +8,12 @@ package suwayomi.tachidesk.server.util
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import io.github.oshai.kotlinlogging.KotlinLogging
-import io.javalin.json.JsonMapper
-import io.javalin.json.fromJsonString
-import okhttp3.OkHttpClient
-import okhttp3.Request.Builder
-import suwayomi.tachidesk.global.impl.AboutDataClass
 import suwayomi.tachidesk.server.RuntimeMode
 import suwayomi.tachidesk.server.serverConfig
-import suwayomi.tachidesk.server.util.Browser.openInBrowser
 import suwayomi.tachidesk.server.util.ExitCode.MutexCheckFailedAnotherAppRunning
-import suwayomi.tachidesk.server.util.ExitCode.MutexCheckFailedTachideskRunning
-import uy.kohesive.injekt.injectLazy
 import java.io.IOException
-import java.util.concurrent.TimeUnit
+import java.net.InetSocketAddress
+import java.net.Socket
 
 object AppMutex {
     private val logger = KotlinLogging.logger {}
@@ -29,11 +22,8 @@ object AppMutex {
         val stat: Int,
     ) {
         Clear(0),
-        TachideskInstanceRunning(1),
         OtherApplicationRunning(2),
     }
-
-    private val jsonMapper: JsonMapper by injectLazy()
 
     private fun appIP(): String {
         val configuredIp = serverConfig.ip.value
@@ -42,33 +32,14 @@ object AppMutex {
 
     private fun checkAppMutex(): AppMutexState {
         val appIP = appIP()
-        val client =
-            OkHttpClient
-                .Builder()
-                .connectTimeout(200, TimeUnit.MILLISECONDS)
-                .build()
-
-        val request =
-            Builder()
-                .url("http://$appIP:${serverConfig.port.value}/api/v1/settings/about/")
-                .build()
-
-        val response =
-            try {
-                client
-                    .newCall(request)
-                    .execute()
-                    .body
-                    .string()
-            } catch (e: IOException) {
-                return AppMutexState.Clear
-            }
 
         return try {
-            jsonMapper.fromJsonString<AboutDataClass>(response)
-            AppMutexState.TachideskInstanceRunning
-        } catch (e: IOException) {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(appIP, serverConfig.port.value), 200)
+            }
             AppMutexState.OtherApplicationRunning
+        } catch (e: IOException) {
+            AppMutexState.Clear
         }
     }
 
@@ -89,18 +60,6 @@ object AppMutex {
         when (checkAppMutex()) {
             AppMutexState.Clear -> {
                 logger.info { "Mutex status is clear, Resuming startup." }
-            }
-
-            AppMutexState.TachideskInstanceRunning -> {
-                val appIP = appIP()
-                logger.info { "Another instance of Suwayomi-Server is running on $appIP:${serverConfig.port.value}" }
-
-                logger.info { "Probably user thought Suwayomi-Server is closed so, opening webUI in browser again." }
-                openInBrowser()
-
-                logger.info { "Aborting startup." }
-
-                shutdownApp(MutexCheckFailedTachideskRunning)
             }
 
             AppMutexState.OtherApplicationRunning -> {

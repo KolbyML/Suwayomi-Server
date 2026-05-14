@@ -1,6 +1,6 @@
 package suwayomi.tachidesk.server.settings
 
-import suwayomi.tachidesk.graphql.types.Settings
+import suwayomi.tachidesk.server.types.Settings
 
 object SettingsValidator {
     fun validate(

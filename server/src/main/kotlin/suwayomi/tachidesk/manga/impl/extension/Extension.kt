@@ -475,8 +475,6 @@ object Extension {
         }
     }
 
-    fun getExtensionIconUrl(apkName: String): String = "/api/v1/extension/icon/$apkName"
-
     private fun String.hasHttpScheme(): Boolean =
         startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
 

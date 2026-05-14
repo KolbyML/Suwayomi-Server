@@ -15,7 +15,6 @@ import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
-import suwayomi.tachidesk.global.model.table.GlobalMetaTable
 import suwayomi.tachidesk.manga.model.table.CategoryMangaTable
 import suwayomi.tachidesk.manga.model.table.CategoryMetaTable
 import suwayomi.tachidesk.manga.model.table.CategoryTable
@@ -27,8 +26,6 @@ import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.PageTable
 import suwayomi.tachidesk.manga.model.table.SourceMetaTable
 import suwayomi.tachidesk.manga.model.table.SourceTable
-import suwayomi.tachidesk.manga.model.table.TrackRecordTable
-import suwayomi.tachidesk.manga.model.table.TrackSearchTable
 import suwayomi.tachidesk.server.ApplicationDirs
 import suwayomi.tachidesk.server.RuntimeStartupMetrics
 import suwayomi.tachidesk.server.plugin.ServerPluginRegistry
@@ -291,9 +288,6 @@ private val schemaTables: Array<Table>
         ChapterMetaTable,
         PageTable,
         CategoryMangaTable,
-        TrackRecordTable,
-        TrackSearchTable,
-        GlobalMetaTable,
     ) + ServerPluginRegistry.plugins.flatMap { it.databaseTables() }
 
 private val supplementalIndexStatements =

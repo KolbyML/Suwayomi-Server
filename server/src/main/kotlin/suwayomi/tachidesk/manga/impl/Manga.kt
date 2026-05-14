@@ -29,10 +29,8 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.BatchUpdateStatement
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
-import suwayomi.tachidesk.manga.impl.MangaList.proxyThumbnailUrl
 import suwayomi.tachidesk.manga.impl.Source.getSource
 import suwayomi.tachidesk.manga.impl.download.fileProvider.impl.MissingThumbnailException
-import suwayomi.tachidesk.manga.impl.track.Track
 import suwayomi.tachidesk.manga.impl.util.network.await
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource.getCatalogueSourceOrNull
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource.getCatalogueSourceOrStub
@@ -78,7 +76,7 @@ object Manga {
                 sourceId = mangaEntry[MangaTable.sourceReference].toString(),
                 url = mangaEntry[MangaTable.url],
                 title = mangaEntry[MangaTable.title],
-                thumbnailUrl = proxyThumbnailUrl(mangaId),
+                thumbnailUrl = sManga.thumbnail_url,
                 thumbnailUrlLastFetched = mangaEntry[MangaTable.thumbnailUrlLastFetched],
                 initialized = true,
                 artist = sManga.artist,
@@ -95,7 +93,6 @@ object Manga {
                 chaptersLastFetchedAt = mangaEntry[MangaTable.chaptersLastFetchedAt],
                 updateStrategy = UpdateStrategy.valueOf(mangaEntry[MangaTable.updateStrategy]),
                 freshData = true,
-                trackers = Track.getTrackRecordsByMangaId(mangaId),
             )
         }
     }
@@ -225,7 +222,7 @@ object Manga {
         sourceId = mangaEntry[MangaTable.sourceReference].toString(),
         url = mangaEntry[MangaTable.url],
         title = mangaEntry[MangaTable.title],
-        thumbnailUrl = proxyThumbnailUrl(mangaId),
+        thumbnailUrl = mangaEntry[MangaTable.thumbnail_url],
         thumbnailUrlLastFetched = mangaEntry[MangaTable.thumbnailUrlLastFetched],
         initialized = true,
         artist = mangaEntry[MangaTable.artist],
@@ -242,7 +239,6 @@ object Manga {
         chaptersLastFetchedAt = mangaEntry[MangaTable.chaptersLastFetchedAt],
         updateStrategy = UpdateStrategy.valueOf(mangaEntry[MangaTable.updateStrategy]),
         freshData = false,
-        trackers = Track.getTrackRecordsByMangaId(mangaId),
     )
 
     fun getMangaMetaMap(mangaId: Int): Map<String, String> =

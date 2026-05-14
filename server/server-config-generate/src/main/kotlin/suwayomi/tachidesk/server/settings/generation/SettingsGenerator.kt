@@ -55,9 +55,7 @@ object SettingsGenerator {
     fun generate(
         outputDir: File,
         testOutputDir: File,
-        graphqlOutputDir: File,
-        backupSettingsOutputDir: File,
-        backupSettingsHandlerOutputDir: File,
+        settingsTypeOutputDir: File,
     ) {
         val settings = SettingsRegistry.getAll()
 
@@ -72,13 +70,7 @@ object SettingsGenerator {
 
         SettingsConfigFileGenerator.generate(outputDir, testOutputDir, settings)
 
-        val settingsTypeFile = graphqlOutputDir.resolve("SettingsType.kt")
-        SettingsGraphqlTypeGenerator.generate(settings, settingsTypeFile)
-
-        val backupServerSettingsFile = backupSettingsOutputDir.resolve("BackupServerSettings.kt")
-        SettingsBackupServerSettingsGenerator.generate(settings, backupServerSettingsFile)
-
-        val backupSettingsHandlerFile = backupSettingsHandlerOutputDir.resolve("BackupSettingsHandler.kt")
-        SettingsBackupSettingsHandlerGenerator.generate(settings, backupSettingsHandlerFile)
+        val settingsTypeFile = settingsTypeOutputDir.resolve("SettingsType.kt")
+        SettingsTypeGenerator.generate(settings, settingsTypeFile)
     }
 }

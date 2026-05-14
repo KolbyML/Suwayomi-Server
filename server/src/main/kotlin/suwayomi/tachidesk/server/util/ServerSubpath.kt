@@ -1,35 +1,13 @@
 package suwayomi.tachidesk.server.util
 
-import suwayomi.tachidesk.server.serverConfig
-
 object ServerSubpath {
-    fun isDefined(): Boolean = raw().isNotBlank()
+    fun isDefined(): Boolean = false
 
-    private fun raw(): String = serverConfig.webUISubpath.value.trim('/')
+    fun normalized(): String = "/"
 
-    fun normalized(): String = "/${raw()}"
+    fun maybeAddAsPrefix(path: String): String = path
 
-    fun maybeAddAsPrefix(path: String): String {
-        if (!isDefined()) {
-            return path
-        }
+    fun maybeAddAsSuffix(path: String): String = path
 
-        return "${normalized()}/${path.removePrefix("/")}"
-    }
-
-    fun maybeAddAsSuffix(path: String): String {
-        if (!isDefined()) {
-            return path
-        }
-
-        return "${path.removeSuffix("/")}/${raw()}/"
-    }
-
-    fun asRootPath(): String {
-        if (!isDefined()) {
-            return "/"
-        }
-
-        return "${normalized()}/"
-    }
+    fun asRootPath(): String = "/"
 }

@@ -7,7 +7,7 @@ import io.github.config4k.ClassContainer
 import io.github.config4k.CustomType
 import io.github.config4k.extract
 import io.github.config4k.toConfig
-import suwayomi.tachidesk.graphql.types.DownloadConversion
+import suwayomi.tachidesk.server.types.DownloadConversion
 import kotlin.time.Duration
 
 class DownloadConversionType : CustomType {
@@ -32,7 +32,7 @@ class DownloadConversionType : CustomType {
     }
 
     override fun testParse(clazz: ClassContainer): Boolean =
-        clazz.mapperClass.qualifiedName == "suwayomi.tachidesk.graphql.types.DownloadConversion"
+        clazz.mapperClass.qualifiedName == "suwayomi.tachidesk.server.types.DownloadConversion"
 
     override fun testToConfig(obj: Any): Boolean = obj is DownloadConversion
 

@@ -2,7 +2,7 @@ package suwayomi.tachidesk.server.settings
 
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.flow.MutableStateFlow
-import suwayomi.tachidesk.graphql.types.Settings
+import suwayomi.tachidesk.server.types.Settings
 import suwayomi.tachidesk.server.ServerConfig
 import suwayomi.tachidesk.server.serverConfig
 import kotlin.reflect.KProperty1

@@ -9,7 +9,7 @@ jte = "3.2.1"
 jackson = "2.18.3" # jackson version locked by javalin, ref: `io.javalin.core.util.OptionalDependency`
 exposed = "0.61.0"
 dex2jar = "2.4.34"
-polyglot = "24.2.2"
+quickjs = "0.9.2"
 settings = "1.3.0"
 twelvemonkeys = "3.13.0"
 graphqlkotlin = "8.8.1"
@@ -68,9 +68,7 @@ exposed-core = { module = "org.jetbrains.exposed:exposed-core", version.ref = "e
 exposed-dao = { module = "org.jetbrains.exposed:exposed-dao", version.ref = "exposed" }
 exposed-jdbc = { module = "org.jetbrains.exposed:exposed-jdbc", version.ref = "exposed" }
 exposed-javatime = { module = "org.jetbrains.exposed:exposed-java-time", version.ref = "exposed" }
-postgres = "org.postgresql:postgresql:42.7.8"
-h2 = "com.h2database:h2:1.4.200" # current database driver, can't update to h2 v2 without sql migration
-hikaricp = "com.zaxxer:HikariCP:7.0.2"
+sqlite-jdbc = "org.xerial:sqlite-jdbc:3.50.3.0"
 
 # Exposed Migrations
 exposed-migrations = "com.github.Suwayomi:exposed-migrations:3.8.0"
@@ -123,9 +121,8 @@ bouncycastle = "org.bouncycastle:bcprov-jdk18on:1.83"
 # AndroidX annotations
 android-annotations = "androidx.annotation:annotation:1.9.1"
 
-# Substitute for duktape-android
-polyglot-core = { module = "org.graalvm.polyglot:polyglot", version.ref = "polyglot" }
-polyglot-graaljs = { module = "org.graalvm.polyglot:js-community", version.ref = "polyglot" }
+# QuickJS
+quickjs-jvm = { module = "app.cash.quickjs:quickjs-jvm", version.ref = "quickjs" }
 
 # Settings
 settings-core = { module = "com.russhwolf:multiplatform-settings-jvm", version.ref = "settings" }
@@ -153,9 +150,6 @@ cron4j = "it.sauronsoftware.cron4j:cron4j:2.2.5"
 
 # cron-utils
 cronUtils = "com.cronutils:cron-utils:9.2.1"
-
-# Webview
-kcef = "dev.datlag:kcef:2024.04.20.4"
 
 # User
 jwt = "com.auth0:java-jwt:4.5.0"
@@ -211,8 +205,7 @@ shared = [
     "dex2jar-translator",
     "dex2jar-tools",
     "apk-parser",
-    "jackson-annotations",
-    "kcef"
+    "jackson-annotations"
 ]
 
 sharedTest = [
@@ -247,10 +240,6 @@ systemtray = [
     "systemtray-core",
     "systemtray-utils",
     "systemtray-desktop"
-]
-polyglot = [
-    "polyglot-core",
-    "polyglot-graaljs",
 ]
 settings = [
     "settings-core",

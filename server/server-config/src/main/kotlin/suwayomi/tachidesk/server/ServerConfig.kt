@@ -28,7 +28,6 @@ import kotlinx.coroutines.flow.onEach
 import org.jetbrains.exposed.sql.SortOrder
 import suwayomi.tachidesk.graphql.types.AuthMode
 import suwayomi.tachidesk.graphql.types.CbzMediaType
-import suwayomi.tachidesk.graphql.types.DatabaseType
 import suwayomi.tachidesk.graphql.types.DownloadConversion
 import suwayomi.tachidesk.graphql.types.KoreaderSyncChecksumMethod
 import suwayomi.tachidesk.graphql.types.KoreaderSyncConflictStrategy
@@ -484,6 +483,15 @@ class ServerConfig(
         excludeFromBackup = true,
     )
 
+    val localAnimeSourcePath: MutableStateFlow<String> by PathSetting(
+        protoNumber = 89,
+        group = SettingGroup.LOCAL_SOURCE,
+        privacySafe = true,
+        defaultValue = "",
+        mustExist = true,
+        excludeFromBackup = true,
+    )
+
     val flareSolverrEnabled: MutableStateFlow<Boolean> by BooleanSetting(
         protoNumber = 43,
         group = SettingGroup.CLOUDFLARE,
@@ -529,6 +537,36 @@ class ServerConfig(
         group = SettingGroup.CLOUDFLARE,
         privacySafe = true,
         defaultValue = false,
+    )
+
+    val iosCloudflareBypassEnabled: MutableStateFlow<Boolean> by BooleanSetting(
+        protoNumber = 90,
+        group = SettingGroup.CLOUDFLARE,
+        privacySafe = true,
+        defaultValue = true,
+        excludeFromBackup = true,
+        description = "Use the native iOS cookie bridge for Cloudflare-protected sources",
+    )
+
+    val iosUserAgentMode: MutableStateFlow<String> by StringSetting(
+        protoNumber = 91,
+        group = SettingGroup.CLOUDFLARE,
+        privacySafe = true,
+        defaultValue = "DEFAULT",
+        pattern = "^(DEFAULT|MOBILE_SAFARI)$".toRegex(),
+        excludeFromBackup = true,
+        description = "User agent profile for native iOS source requests",
+    )
+
+    val iosReceiveTimeoutSeconds: MutableStateFlow<Int> by IntSetting(
+        protoNumber = 92,
+        group = SettingGroup.CLOUDFLARE,
+        privacySafe = true,
+        defaultValue = 30.seconds.inWholeSeconds.toInt(),
+        min = 5,
+        max = 600,
+        excludeFromBackup = true,
+        description = "Time in seconds for native iOS source request timeout",
     )
 
     val opdsUseBinaryFileSizes: MutableStateFlow<Boolean> by BooleanSetting(
@@ -877,40 +915,6 @@ class ServerConfig(
         requiresRestart = true,
     )
 
-    val databaseType: MutableStateFlow<DatabaseType> by EnumSetting(
-        protoNumber = 69,
-        group = SettingGroup.DATABASE,
-        privacySafe = true,
-        defaultValue = DatabaseType.H2,
-        enumClass = DatabaseType::class,
-        typeInfo = SettingsRegistry.PartialTypeInfo(imports = listOf("suwayomi.tachidesk.graphql.types.DatabaseType")),
-        excludeFromBackup = true,
-    )
-
-    val databaseUrl: MutableStateFlow<String> by StringSetting(
-        protoNumber = 70,
-        group = SettingGroup.DATABASE,
-        privacySafe = true,
-        defaultValue = "postgresql://localhost:5432/suwayomi",
-        excludeFromBackup = true,
-    )
-
-    val databaseUsername: MutableStateFlow<String> by StringSetting(
-        protoNumber = 71,
-        group = SettingGroup.DATABASE,
-        privacySafe = false,
-        defaultValue = "",
-        excludeFromBackup = true,
-    )
-
-    val databasePassword: MutableStateFlow<String> by StringSetting(
-        protoNumber = 72,
-        group = SettingGroup.DATABASE,
-        privacySafe = false,
-        defaultValue = "",
-        excludeFromBackup = true,
-    )
-
     val koreaderSyncStrategyForward: MutableStateFlow<KoreaderSyncConflictStrategy> by EnumSetting(
         protoNumber = 73,
         group = SettingGroup.KOREADER_SYNC,
@@ -1007,15 +1011,39 @@ class ServerConfig(
         key = "serveConversions"
     )
 
-    val useHikariConnectionPool: MutableStateFlow<Boolean> by BooleanSetting(
-        protoNumber = 85,
-        group = SettingGroup.DATABASE,
+    val enableCookieApi: MutableStateFlow<Boolean> by BooleanSetting(
+        protoNumber = 87,
+        group = SettingGroup.NETWORK,
         privacySafe = true,
-        defaultValue = true,
-        excludeFromBackup = true,
-        description = "Use Hikari Connection Pool to connect to the database.",
-    )
+        defaultValue = false,
+        description = "Enable the /api/v1/cookie endpoint for syncing cookies from external webviews."
+    )    
 
+    val animeExtensionRepos: MutableStateFlow<List<String>> by ListSetting<String>(
+        protoNumber = 88,
+        group = SettingGroup.EXTENSION,
+        privacySafe = false,
+        defaultValue = emptyList(),
+        itemValidator = { url ->
+            if (url.matches(repoMatchRegex)) {
+                null
+            } else {
+                "Invalid repository URL format"
+            }
+        },
+        itemToValidValue = { url ->
+            if (url.matches(repoMatchRegex)) {
+                url
+            } else {
+                null
+            }
+        },
+        typeInfo =
+            SettingsRegistry.PartialTypeInfo(
+                specificType = "List<String>",
+            ),
+        description = "example: [\"https://github.com/MY_ACCOUNT/MY_REPO/tree/repo\"]",
+    )
 
 
     /** ****************************************************************** **/

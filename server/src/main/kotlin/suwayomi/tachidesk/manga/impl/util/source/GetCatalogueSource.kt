@@ -12,8 +12,10 @@ import eu.kanade.tachiyomi.source.Source
 import eu.kanade.tachiyomi.source.SourceFactory
 import eu.kanade.tachiyomi.source.online.HttpSource
 import io.github.oshai.kotlinlogging.KotlinLogging
+import org.jetbrains.exposed.sql.update
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import suwayomi.tachidesk.manga.impl.util.PackageTools
 import suwayomi.tachidesk.manga.impl.util.PackageTools.loadExtensionSources
 import suwayomi.tachidesk.manga.model.table.ExtensionTable
 import suwayomi.tachidesk.manga.model.table.SourceTable
@@ -36,7 +38,10 @@ object GetCatalogueSource {
         val sourceRecord =
             transaction {
                 SourceTable.selectAll().where { SourceTable.id eq sourceId }.firstOrNull()
-            } ?: return null
+            } ?: run {
+                logger.warn { "getCatalogueSource missing SourceTable row for sourceId=$sourceId" }
+                return null
+            }
 
         val extensionId = sourceRecord[SourceTable.extension]
         val extensionRecord =
@@ -45,18 +50,64 @@ object GetCatalogueSource {
             }
 
         val apkName = extensionRecord[ExtensionTable.apkName]
-        val className = extensionRecord[ExtensionTable.classFQName]
+        val pkgName = extensionRecord[ExtensionTable.pkgName]
         val jarName = apkName.substringBefore(".apk") + ".jar"
         val jarPath = "${applicationDirs.extensionsRoot}/$jarName"
+        val className =
+            resolveClassName(
+                extensionId = extensionId.value,
+                pkgName = pkgName,
+                apkName = apkName,
+                existingClassName = extensionRecord[ExtensionTable.classFQName],
+            ) ?: return null
+
+        logger.info {
+            "getCatalogueSource sourceId=$sourceId extensionId=${extensionId.value} pkg=$pkgName apk=$apkName class=$className jar=$jarPath"
+        }
 
         when (val instance = loadExtensionSources(jarPath, className)) {
             is Source -> listOf(instance)
             is SourceFactory -> instance.createSources()
             else -> throw Exception("Unknown source class type! ${instance.javaClass}")
         }.forEach {
+            logger.info {
+                "registering catalogue source id=${it.id} name=${it.name} lang=${it.lang} from class=$className"
+            }
             sourceCache[it.id] = it as HttpSource
         }
         return sourceCache[sourceId]!!
+    }
+
+    private fun resolveClassName(
+        extensionId: Int,
+        pkgName: String,
+        apkName: String,
+        existingClassName: String,
+    ): String? {
+        if (existingClassName.isNotBlank()) {
+            return existingClassName
+        }
+
+        val apkPath = "${applicationDirs.extensionsRoot}/$apkName"
+        val startedAt = System.nanoTime()
+        val derivedClassName = PackageTools.deriveExtensionClassName(apkPath, pkgName, isAnime = false)
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        if (derivedClassName.isNullOrBlank()) {
+            logger.warn {
+                "getCatalogueSource failed to derive class name pkg=$pkgName apk=$apkName elapsedMs=$elapsedMs"
+            }
+            return null
+        }
+
+        transaction {
+            ExtensionTable.update({ ExtensionTable.id eq extensionId }) {
+                it[classFQName] = derivedClassName
+            }
+        }
+        logger.info {
+            "getCatalogueSource lazily derived class name pkg=$pkgName apk=$apkName class=$derivedClassName elapsedMs=$elapsedMs"
+        }
+        return derivedClassName
     }
 
     fun getCatalogueSourceOrNull(sourceId: Long): CatalogueSource? =

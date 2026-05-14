@@ -14,8 +14,6 @@ import com.typesafe.config.ConfigException
 import com.typesafe.config.ConfigRenderOptions
 import com.typesafe.config.ConfigValue
 import com.typesafe.config.parser.ConfigDocument
-import dev.datlag.kcef.KCEF
-import dev.datlag.kcef.KCEFBuilder.Settings.LogSeverity
 import eu.kanade.tachiyomi.App
 import eu.kanade.tachiyomi.createAppModule
 import eu.kanade.tachiyomi.network.NetworkHelper
@@ -31,14 +29,10 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.launch
 import org.bouncycastle.jce.provider.BouncyCastleProvider
-import org.cef.network.CefCookieManager
 import org.koin.core.context.startKoin
 import org.koin.core.module.Module
 import org.koin.dsl.module
-import suwayomi.tachidesk.global.impl.KcefWebView.Companion.toCefCookie
-import suwayomi.tachidesk.graphql.types.DatabaseType
 import suwayomi.tachidesk.i18n.LocalizationHelper
 import suwayomi.tachidesk.manga.impl.backup.proto.ProtoBackupExport
 import suwayomi.tachidesk.manga.impl.download.DownloadManager
@@ -46,7 +40,9 @@ import suwayomi.tachidesk.manga.impl.update.IUpdater
 import suwayomi.tachidesk.manga.impl.update.Updater
 import suwayomi.tachidesk.manga.impl.util.lang.renameTo
 import suwayomi.tachidesk.server.database.databaseUp
+import suwayomi.tachidesk.server.database.databaseUpRuntime
 import suwayomi.tachidesk.server.generated.BuildConfig
+import suwayomi.tachidesk.server.plugin.ServerPluginRegistry
 import suwayomi.tachidesk.server.settings.SettingsRegistry
 import suwayomi.tachidesk.server.util.AppMutex.handleAppMutex
 import suwayomi.tachidesk.server.util.ConfigTypeRegistration
@@ -58,7 +54,6 @@ import uy.kohesive.injekt.api.get
 import xyz.nulldev.androidcompat.AndroidCompat
 import xyz.nulldev.androidcompat.AndroidCompatInitializer
 import xyz.nulldev.androidcompat.androidCompatModule
-import xyz.nulldev.androidcompat.webkit.KcefWebViewProvider
 import xyz.nulldev.ts.config.ApplicationRootDir
 import xyz.nulldev.ts.config.BASE_LOGGER_NAME
 import xyz.nulldev.ts.config.GlobalConfigManager
@@ -75,23 +70,222 @@ import kotlin.concurrent.thread
 import kotlin.io.path.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.div
-import kotlin.math.roundToInt
 
 private val logger = KotlinLogging.logger {}
+
+private fun shouldDeferEmbeddedLoggerInit(runtimeOnly: Boolean): Boolean =
+    runtimeOnly && !System.getProperty("manatan.runtimeBootstrapManifest").isNullOrBlank()
+
+private fun applyProxySettings(
+    proxyEnabled: Boolean,
+    proxyVersion: Int,
+    proxyHost: String,
+    proxyPort: String,
+    proxyUsername: String,
+    proxyPassword: String,
+) {
+    if (proxyEnabled) {
+        System.setProperty("socksProxyHost", proxyHost)
+        System.setProperty("socksProxyPort", proxyPort)
+        System.setProperty("socksProxyVersion", proxyVersion.toString())
+
+        Authenticator.setDefault(
+            object : Authenticator() {
+                override fun getPasswordAuthentication(): PasswordAuthentication? {
+                    if (requestingProtocol.startsWith("SOCKS", ignoreCase = true)) {
+                        return PasswordAuthentication(
+                            proxyUsername,
+                            proxyPassword.toCharArray(),
+                        )
+                    }
+
+                    return null
+                }
+            },
+        )
+    } else {
+        System.clearProperty("socksProxyHost")
+        System.clearProperty("socksProxyPort")
+        System.clearProperty("socksProxyVersion")
+
+        Authenticator.setDefault(null)
+    }
+}
+
+private fun registerProxySettingsSubscription() {
+    serverConfig.subscribeTo(
+        combine<Any, ProxySettings>(
+            serverConfig.socksProxyEnabled,
+            serverConfig.socksProxyVersion,
+            serverConfig.socksProxyHost,
+            serverConfig.socksProxyPort,
+            serverConfig.socksProxyUsername,
+            serverConfig.socksProxyPassword,
+        ) { vargs ->
+            ProxySettings(
+                vargs[0] as Boolean,
+                vargs[1] as Int,
+                vargs[2] as String,
+                vargs[3] as String,
+                vargs[4] as String,
+                vargs[5] as String,
+            )
+        }.distinctUntilChanged(),
+        { (proxyEnabled, proxyVersion, proxyHost, proxyPort, proxyUsername, proxyPassword) ->
+            logger.info {
+                "Socks Proxy changed - enabled=$proxyEnabled address=$proxyHost:$proxyPort , username=[REDACTED], password=[REDACTED]"
+            }
+            applyProxySettings(
+                proxyEnabled = proxyEnabled,
+                proxyVersion = proxyVersion,
+                proxyHost = proxyHost,
+                proxyPort = proxyPort,
+                proxyUsername = proxyUsername,
+                proxyPassword = proxyPassword,
+            )
+        },
+        ignoreInitialValue = false,
+    )
+}
+
+private fun startDeferredRuntimeOnlyServices(
+    applicationDirs: ApplicationDirs,
+    deferEmbeddedLoggerInit: Boolean,
+) {
+    thread(name = "runtime-only-startup", isDaemon = true) {
+        val startedAt = System.nanoTime()
+
+        registerProxySettingsSubscription()
+        val proxyElapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        logger.info { "Deferred runtime-only proxy subscription complete elapsedMs=$proxyElapsedMs" }
+
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(BouncyCastleProvider())
+        }
+        val cryptoElapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        logger.info { "Deferred runtime-only crypto provider ready elapsedMs=$cryptoElapsedMs" }
+
+        if (deferEmbeddedLoggerInit) {
+            startDeferredLoggerInitialization(applicationDirs)
+            logger.info { "Deferred runtime-only logger init launched elapsedMs=${(System.nanoTime() - startedAt) / 1_000_000}" }
+        }
+    }
+}
+
+private fun ensureDirectories(paths: List<String>) {
+    paths.forEach { File(it).mkdirs() }
+}
+
+private fun ensureServerConf(applicationDirs: ApplicationDirs) {
+    try {
+        val dataConfFile = File("${applicationDirs.dataRoot}/server.conf")
+        if (!dataConfFile.exists()) {
+            JavalinSetup::class.java.getResourceAsStream("/server-reference.conf").use { input ->
+                dataConfFile.outputStream().use { output -> input.copyTo(output) }
+            }
+        } else {
+            GlobalConfigManager.updateUserConfig { migrateConfig(this, it) }
+        }
+    } catch (e: Exception) {
+        logger.error(e) { "Exception while creating initial server.conf" }
+    }
+}
+
+private fun ensureLocalSourceIcon(applicationDirs: ApplicationDirs) {
+    try {
+        val localSourceIconFile = File("${applicationDirs.extensionsRoot}/icon/localSource.png")
+        if (!localSourceIconFile.exists()) {
+            JavalinSetup::class.java.getResourceAsStream("/icon/localSource.png").use { input ->
+                localSourceIconFile.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+    } catch (e: Exception) {
+        logger.error(e) { "Exception while copying Local source's icon" }
+    }
+}
+
+private fun startDeferredRuntimeOnlyDirectorySetup(applicationDirs: ApplicationDirs) {
+    thread(name = "runtime-only-dirs", isDaemon = true) {
+        val startedAt = System.nanoTime()
+        ensureDirectories(
+            listOf(
+                applicationDirs.tempThumbnailCacheRoot,
+                applicationDirs.downloadsRoot,
+            ),
+        )
+        logger.info { "Deferred runtime-only directory setup complete elapsedMs=${(System.nanoTime() - startedAt) / 1_000_000}" }
+    }
+}
+
+private fun startDeferredRuntimeOnlyStaticArtifacts(applicationDirs: ApplicationDirs) {
+    thread(name = "runtime-only-static-artifacts", isDaemon = true) {
+        val startedAt = System.nanoTime()
+        ensureServerConf(applicationDirs)
+        val serverConfElapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        logger.info { "Deferred runtime-only server.conf setup complete elapsedMs=$serverConfElapsedMs" }
+
+        ensureLocalSourceIcon(applicationDirs)
+        val iconElapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        logger.info { "Deferred runtime-only local source icon setup complete elapsedMs=$iconElapsedMs" }
+    }
+}
+
+private fun initializeLoggerPipeline(applicationDirs: ApplicationDirs) {
+    initLoggerConfig(
+        applicationDirs.dataRoot,
+        serverConfig.maxLogFiles.value,
+        serverConfig.maxLogFileSize.value,
+        serverConfig.maxLogFolderSize.value,
+    )
+
+    serverConfig.subscribeTo(
+        combine(
+            serverConfig.maxLogFiles,
+            serverConfig.maxLogFileSize,
+            serverConfig.maxLogFolderSize,
+        ) { maxLogFiles, maxLogFileSize, maxLogFolderSize ->
+            Triple(maxLogFiles, maxLogFileSize, maxLogFolderSize)
+        }.distinctUntilChanged(),
+        { (maxLogFiles, maxLogFileSize, maxLogFolderSize) ->
+            logger.debug {
+                "updateFileAppender: maxLogFiles= $maxLogFiles, maxLogFileSize= $maxLogFileSize, maxLogFolderSize= $maxLogFolderSize"
+            }
+            updateFileAppender(maxLogFiles, maxLogFileSize, maxLogFolderSize)
+        },
+    )
+
+    setupLogLevelUpdating(serverConfig.debugLogsEnabled, listOf(BASE_LOGGER_NAME))
+}
+
+private fun startDeferredLoggerInitialization(applicationDirs: ApplicationDirs) {
+    thread(name = "embedded-logger-init", isDaemon = true) {
+        val startedAt = System.nanoTime()
+        initializeLoggerPipeline(applicationDirs)
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        logger.info { "Deferred embedded logger initialization complete elapsedMs=$elapsedMs" }
+    }
+}
 
 class ApplicationDirs(
     val dataRoot: String = ApplicationRootDir,
     val tempRoot: String = "${System.getProperty("java.io.tmpdir")}/Tachidesk",
 ) {
+    private val configuredDownloadsRoot = System.getProperty("suwayomi.tachidesk.config.server.downloadsPath").orEmpty()
+    private val configuredLocalMangaRoot = System.getProperty("suwayomi.tachidesk.config.server.localSourcePath").orEmpty()
+    private val configuredLocalAnimeRoot = System.getProperty("suwayomi.tachidesk.config.server.localAnimeSourcePath").orEmpty()
+    private val configuredBackupRoot = System.getProperty("suwayomi.tachidesk.config.server.backupPath").orEmpty()
+
     val extensionsRoot = "$dataRoot/extensions"
     val downloadsRoot
-        get() = serverConfig.downloadsPath.value.ifBlank { "$dataRoot/downloads" }
+        get() = configuredDownloadsRoot.ifBlank { serverConfig.downloadsPath.value.ifBlank { "$dataRoot/downloads" } }
     val localMangaRoot
-        get() = serverConfig.localSourcePath.value.ifBlank { "$dataRoot/local" }
+        get() = configuredLocalMangaRoot.ifBlank { serverConfig.localSourcePath.value.ifBlank { "$dataRoot/local" } }
+    val localAnimeRoot
+        get() = configuredLocalAnimeRoot.ifBlank { serverConfig.localAnimeSourcePath.value.ifBlank { "$dataRoot/localanime" } }
     val webUIRoot = "$dataRoot/webUI"
     val webUIServe = "$tempRoot/webUI-serve"
     val automatedBackupRoot
-        get() = serverConfig.backupPath.value.ifBlank { "$dataRoot/backups" }
+        get() = configuredBackupRoot.ifBlank { serverConfig.backupPath.value.ifBlank { "$dataRoot/backups" } }
 
     val tempThumbnailCacheRoot = "$tempRoot/thumbnails"
     val tempMangaCacheRoot = "$tempRoot/manga-cache"
@@ -100,6 +294,8 @@ class ApplicationDirs(
         get() = "$downloadsRoot/thumbnails"
     val mangaDownloadsRoot
         get() = "$downloadsRoot/mangas"
+    val animeDownloadsRoot
+        get() = "$downloadsRoot/anime"
 }
 
 @Suppress("DEPRECATION")
@@ -118,14 +314,6 @@ data class ProxySettings(
     val proxyPort: String,
     val proxyUsername: String,
     val proxyPassword: String,
-)
-
-data class DatabaseSettings(
-    val databaseType: DatabaseType,
-    val databaseUrl: String,
-    val databaseUsername: String,
-    val databasePassword: String,
-    val useHikariConnectionPool: Boolean,
 )
 
 val androidCompat by lazy { AndroidCompat() }
@@ -227,48 +415,41 @@ fun serverModule(applicationDirs: ApplicationDirs): Module =
 
 @OptIn(DelicateCoroutinesApi::class)
 fun applicationSetup() {
+    RuntimeStartupMetrics.logStage("application_setup_enter")
     Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
         KotlinLogging.logger {}.error(throwable) { "unhandled exception" }
     }
 
+    val runtimeOnly = RuntimeMode.isRuntimeOnly()
+    if (runtimeOnly) {
+        logger.info { "Runtime-only mode enabled; skipping database and background services." }
+    }
+    val deferEmbeddedLoggerInit = shouldDeferEmbeddedLoggerInit(runtimeOnly)
+
     val mainLoop = LooperThread()
     mainLoop.start()
+    RuntimeStartupMetrics.logStage("main_loop_started")
 
     // register Tachidesk's config which is dubbed "ServerConfig"
     ConfigTypeRegistration.registerCustomTypes()
     GlobalConfigManager.registerModule(
         ServerConfig.register { GlobalConfigManager.config },
     )
+    RuntimeStartupMetrics.logStage("config_registered")
 
     // Application dirs
     val applicationDirs = ApplicationDirs()
+    ServerPluginRegistry.onApplicationDirsReady(applicationDirs)
 
-    initLoggerConfig(
-        applicationDirs.dataRoot,
-        serverConfig.maxLogFiles.value,
-        serverConfig.maxLogFileSize.value,
-        serverConfig.maxLogFolderSize.value,
-    )
-
-    serverConfig.subscribeTo(
-        combine(
-            serverConfig.maxLogFiles,
-            serverConfig.maxLogFileSize,
-            serverConfig.maxLogFolderSize,
-        ) { maxLogFiles, maxLogFileSize, maxLogFolderSize ->
-            Triple(maxLogFiles, maxLogFileSize, maxLogFolderSize)
-        }.distinctUntilChanged(),
-        { (maxLogFiles, maxLogFileSize, maxLogFolderSize) ->
-            logger.debug {
-                "updateFileAppender: maxLogFiles= $maxLogFiles, maxLogFileSize= $maxLogFileSize, maxLogFolderSize= $maxLogFolderSize"
-            }
-            updateFileAppender(maxLogFiles, maxLogFileSize, maxLogFolderSize)
-        },
-    )
-
-    setupLogLevelUpdating(serverConfig.debugLogsEnabled, listOf(BASE_LOGGER_NAME))
+    if (deferEmbeddedLoggerInit) {
+        RuntimeStartupMetrics.logStage("logger_init_deferred")
+    } else {
+        initializeLoggerPipeline(applicationDirs)
+        RuntimeStartupMetrics.logStage("logger_initialized")
+    }
 
     logger.info { "Running Suwayomi-Server ${BuildConfig.VERSION}" }
+    RuntimeStartupMetrics.logStage("version_logged")
 
     logger.debug {
         "Loaded config:\n" +
@@ -289,62 +470,55 @@ fun applicationSetup() {
     File("$ApplicationRootDir/manga-thumbnails").renameTo(applicationDirs.tempThumbnailCacheRoot)
     File("$ApplicationRootDir/manga-local").renameTo(applicationDirs.localMangaRoot)
     File("$ApplicationRootDir/anime-thumbnails").delete()
+    RuntimeStartupMetrics.logStage("legacy_dirs_migrated")
 
-    // make dirs we need
-    listOf(
-        applicationDirs.dataRoot,
-        applicationDirs.extensionsRoot,
-        applicationDirs.extensionsRoot + "/icon",
-        applicationDirs.tempThumbnailCacheRoot,
-        applicationDirs.downloadsRoot,
-        applicationDirs.localMangaRoot,
-    ).forEach { File(it).mkdirs() }
+    val criticalDirs =
+        listOf(
+            applicationDirs.dataRoot,
+            applicationDirs.extensionsRoot,
+            applicationDirs.extensionsRoot + "/icon",
+            applicationDirs.localMangaRoot,
+            applicationDirs.localAnimeRoot,
+        )
+    ensureDirectories(criticalDirs)
+    RuntimeStartupMetrics.logStage("critical_dirs_ready")
+
+    if (runtimeOnly) {
+        startDeferredRuntimeOnlyDirectorySetup(applicationDirs)
+        RuntimeStartupMetrics.logStage("runtime_only_deferred_dirs_started")
+    } else {
+        ensureDirectories(
+            listOf(
+                applicationDirs.tempThumbnailCacheRoot,
+                applicationDirs.downloadsRoot,
+            ),
+        )
+        RuntimeStartupMetrics.logStage("all_dirs_ready")
+    }
 
     // initialize Koin modules
     val app = App()
+    RuntimeStartupMetrics.logStage("koin_start_begin")
     startKoin {
         modules(
             createAppModule(app),
             androidCompatModule(),
             configManagerModule(),
             serverModule(applicationDirs),
-            module {
-                single<KcefWebViewProvider.InitBrowserHandler> {
-                    object : KcefWebViewProvider.InitBrowserHandler {
-                        override fun init(provider: KcefWebViewProvider) {
-                            val networkHelper = Injekt.get<NetworkHelper>()
-                            val logger = KotlinLogging.logger {}
-                            logger.info { "Start loading cookies" }
-                            CefCookieManager.getGlobalManager().apply {
-                                val cookies = networkHelper.cookieStore.getStoredCookies()
-                                for (cookie in cookies) {
-                                    try {
-                                        if (!setCookie(
-                                                "https://" + cookie.domain,
-                                                cookie.toCefCookie(),
-                                            )
-                                        ) {
-                                            throw Exception()
-                                        }
-                                    } catch (e: Exception) {
-                                        logger.warn(e) { "Loading cookie ${cookie.name} failed" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
         )
     }
+    RuntimeStartupMetrics.logStage("koin_started")
 
     // Make sure only one instance of the app is running
     handleAppMutex()
+    RuntimeStartupMetrics.logStage("app_mutex_ready")
 
     // Load Android compatibility dependencies
     AndroidCompatInitializer().init()
+    RuntimeStartupMetrics.logStage("android_compat_initializer_ready")
     // start app
     androidCompat.startApp(app)
+    RuntimeStartupMetrics.logStage("android_compat_app_started")
 
     // Initialize NetworkHelper early
     Injekt
@@ -352,32 +526,18 @@ fun applicationSetup() {
         .userAgentFlow
         .onEach { System.setProperty("http.agent", it) }
         .launchIn(GlobalScope)
+    RuntimeStartupMetrics.logStage("network_helper_initialized")
 
-    // create or update conf file if doesn't exist
-    try {
-        val dataConfFile = File("${applicationDirs.dataRoot}/server.conf")
-        if (!dataConfFile.exists()) {
-            JavalinSetup::class.java.getResourceAsStream("/server-reference.conf").use { input ->
-                dataConfFile.outputStream().use { output -> input.copyTo(output) }
-            }
-        } else {
-            // make sure the user config file is up-to-date
-            GlobalConfigManager.updateUserConfig { migrateConfig(this, it) }
-        }
-    } catch (e: Exception) {
-        logger.error(e) { "Exception while creating initial server.conf" }
-    }
+    if (runtimeOnly) {
+        startDeferredRuntimeOnlyStaticArtifacts(applicationDirs)
+        RuntimeStartupMetrics.logStage("server_conf_deferred")
+        RuntimeStartupMetrics.logStage("local_source_icon_deferred")
+    } else {
+        ensureServerConf(applicationDirs)
+        RuntimeStartupMetrics.logStage("server_conf_ready")
 
-    // copy local source icon
-    try {
-        val localSourceIconFile = File("${applicationDirs.extensionsRoot}/icon/localSource.png")
-        if (!localSourceIconFile.exists()) {
-            JavalinSetup::class.java.getResourceAsStream("/icon/localSource.png").use { input ->
-                localSourceIconFile.outputStream().use { output -> input.copyTo(output) }
-            }
-        }
-    } catch (e: Exception) {
-        logger.error(e) { "Exception while copying Local source's icon" }
+        ensureLocalSourceIcon(applicationDirs)
+        RuntimeStartupMetrics.logStage("local_source_icon_ready")
     }
 
     // fixes #119 , ref:
@@ -387,180 +547,97 @@ fun applicationSetup() {
 
     // Initialize the localization service
     LocalizationHelper.initialize()
+    RuntimeStartupMetrics.logStage("localization_initialized")
     logger.debug {
         "Localization service initialized. Supported languages: ${LocalizationHelper.getSupportedLocales()}"
     }
 
-    databaseUp()
+    if (runtimeOnly) {
+        setLogLevelFor("Exposed", Level.WARN)
+        setLogLevelFor("org.jetbrains.exposed", Level.WARN)
+        RuntimeStartupMetrics.logStage("runtime_sql_logging_quieted")
+        databaseUpRuntime()
+        RuntimeStartupMetrics.logStage("runtime_database_ready")
+        ServerPluginRegistry.onRuntimeDatabaseReady()
+        LocalSource.register()
+        RuntimeStartupMetrics.logStage("local_manga_source_registered")
+    } else {
+        databaseUp()
+        ServerPluginRegistry.onPersistentDatabaseReady()
 
-    LocalSource.register()
+        LocalSource.register()
 
-    serverConfig.subscribeTo(
-        combine<Any, DatabaseSettings>(
-            serverConfig.databaseType,
-            serverConfig.databaseUrl,
-            serverConfig.databaseUsername,
-            serverConfig.databasePassword,
-            serverConfig.useHikariConnectionPool,
-        ) { vargs ->
-            DatabaseSettings(
-                vargs[0] as DatabaseType,
-                vargs[1] as String,
-                vargs[2] as String,
-                vargs[3] as String,
-                vargs[4] as Boolean,
-            )
-        }.distinctUntilChanged(),
-        { (databaseType, databaseUrl, _databaseUsername, _databasePassword, hikariCp) ->
-            logger.info {
-                "Database changed - type=$databaseType url=$databaseUrl, username=[REDACTED], password=[REDACTED], hikaricp=$hikariCp"
-            }
-            databaseUp()
-
-            LocalSource.register()
-        },
-        ignoreInitialValue = true,
-    )
-
-    // create system tray
-    serverConfig.subscribeTo(
-        serverConfig.systemTrayEnabled,
-        { systemTrayEnabled ->
-            try {
-                if (systemTrayEnabled) {
-                    SystemTray.create()
-                } else {
-                    SystemTray.remove()
+        // create system tray
+        serverConfig.subscribeTo(
+            serverConfig.systemTrayEnabled,
+            { systemTrayEnabled ->
+                try {
+                    if (systemTrayEnabled) {
+                        SystemTray.create()
+                    } else {
+                        SystemTray.remove()
+                    }
+                } catch (e: Throwable) {
+                    // cover both java.lang.Exception and java.lang.Error
+                    logger.error(e) { "Failed to create/remove SystemTray due to" }
                 }
-            } catch (e: Throwable) {
-                // cover both java.lang.Exception and java.lang.Error
-                logger.error(e) { "Failed to create/remove SystemTray due to" }
-            }
-        },
-        ignoreInitialValue = false,
-    )
+            },
+            ignoreInitialValue = false,
+        )
 
-    runMigrations(applicationDirs)
+        runMigrations(applicationDirs)
+    }
 
     setLogLevelFor("org.eclipse.jetty", Level.OFF)
     setLogLevelFor("com.zaxxer.hikari", Level.WARN)
 
-    // socks proxy settings
-    serverConfig.subscribeTo(
-        combine<Any, ProxySettings>(
-            serverConfig.socksProxyEnabled,
-            serverConfig.socksProxyVersion,
-            serverConfig.socksProxyHost,
-            serverConfig.socksProxyPort,
-            serverConfig.socksProxyUsername,
-            serverConfig.socksProxyPassword,
-        ) { vargs ->
-            ProxySettings(
-                vargs[0] as Boolean,
-                vargs[1] as Int,
-                vargs[2] as String,
-                vargs[3] as String,
-                vargs[4] as String,
-                vargs[5] as String,
-            )
-        }.distinctUntilChanged(),
-        { (proxyEnabled, proxyVersion, proxyHost, proxyPort, proxyUsername, proxyPassword) ->
-            logger.info {
-                "Socks Proxy changed - enabled=$proxyEnabled address=$proxyHost:$proxyPort , username=[REDACTED], password=[REDACTED]"
-            }
-            if (proxyEnabled) {
-                System.setProperty("socksProxyHost", proxyHost)
-                System.setProperty("socksProxyPort", proxyPort)
-                System.setProperty("socksProxyVersion", proxyVersion.toString())
-
-                Authenticator.setDefault(
-                    object : Authenticator() {
-                        override fun getPasswordAuthentication(): PasswordAuthentication? {
-                            if (requestingProtocol.startsWith("SOCKS", ignoreCase = true)) {
-                                return PasswordAuthentication(
-                                    proxyUsername,
-                                    proxyPassword.toCharArray(),
-                                )
-                            }
-
-                            return null
-                        }
-                    },
-                )
-            } else {
-                System.clearProperty("socksProxyHost")
-                System.clearProperty("socksProxyPort")
-                System.clearProperty("socksProxyVersion")
-
-                Authenticator.setDefault(null)
-            }
-        },
-        ignoreInitialValue = false,
-    )
-
-    // AES/CBC/PKCS7Padding Cypher provider for zh.copymanga
-    Security.addProvider(BouncyCastleProvider())
-
-    // start automated global updates
-    val updater = Injekt.get<IUpdater>()
-    (updater as Updater).scheduleUpdateTask()
-
-    // start automated backups
-    ProtoBackupExport.scheduleAutomatedBackupTask()
-
-    // start DownloadManager and restore + resume downloads
-    DownloadManager.restoreAndResumeDownloads()
-
-    GlobalScope.launch {
-        val logger = KotlinLogging.logger("KCEF")
-        KCEF.init(
-            builder = {
-                progress {
-                    var lastNum = -1
-                    onDownloading {
-                        val num = it.roundToInt()
-                        if (num > lastNum) {
-                            lastNum = num
-                            logger.info { "KCEF download progress: $num%" }
-                        }
-                    }
-                }
-                download { github() }
-                settings {
-                    windowlessRenderingEnabled = true
-                    cachePath = (Path(applicationDirs.dataRoot) / "cache/kcef").toString()
-                    logSeverity = if (serverConfig.debugLogsEnabled.value) LogSeverity.Verbose else LogSeverity.Default
-                }
-                appHandler(
-                    KCEF.AppHandler(
-                        arrayOf(
-                            "--disable-gpu",
-                            // #1486 needed to be able to render without a window
-                            "--off-screen-rendering-enabled",
-                            // #1489 since /dev/shm is restricted in docker (OOM)
-                            "--disable-dev-shm-usage",
-                            // #1723 support Widevine (incomplete)
-                            "--enable-widevine-cdm",
-                            // #1736 JCEF does implement stack guards properly
-                            "--change-stack-guard-on-fork=disable",
-                        ),
-                    ),
-                )
-
-                val kcefDir = Path(applicationDirs.dataRoot) / "bin/kcef"
-                kcefDir.createDirectories()
-                installDir(kcefDir.toFile())
-            },
-            onError = { it?.printStackTrace() },
-        )
+    // Some Windows environments deny getsockopt on non-blocking connect
+    // (seen as java.net.SocketException: Permission denied: getsockopt).
+    // Force the plain socket implementation there to avoid the affected path.
+    val isWindows = System.getProperty("os.name").orEmpty().contains("Windows", ignoreCase = true)
+    if (isWindows && System.getProperty("jdk.net.usePlainSocketImpl").isNullOrBlank()) {
+        System.setProperty("jdk.net.usePlainSocketImpl", "true")
     }
 
-    Runtime.getRuntime().addShutdownHook(
-        thread(start = false) {
-            val logger = KotlinLogging.logger("KCEF")
-            logger.debug { "Shutting down KCEF" }
-            KCEF.disposeBlocking()
-            logger.debug { "KCEF shutdown complete" }
-        },
-    )
+    // socks proxy settings
+    if (runtimeOnly) {
+        applyProxySettings(
+            proxyEnabled = serverConfig.socksProxyEnabled.value,
+            proxyVersion = serverConfig.socksProxyVersion.value,
+            proxyHost = serverConfig.socksProxyHost.value,
+            proxyPort = serverConfig.socksProxyPort.value,
+            proxyUsername = serverConfig.socksProxyUsername.value,
+            proxyPassword = serverConfig.socksProxyPassword.value,
+        )
+        RuntimeStartupMetrics.logStage("runtime_only_proxy_seeded")
+    } else {
+        registerProxySettingsSubscription()
+        RuntimeStartupMetrics.logStage("proxy_subscription_ready")
+
+        // AES/CBC/PKCS7Padding Cypher provider for zh.copymanga
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(BouncyCastleProvider())
+        }
+        RuntimeStartupMetrics.logStage("crypto_provider_ready")
+    }
+
+    if (!runtimeOnly) {
+        // start automated global updates
+        val updater = Injekt.get<IUpdater>()
+        (updater as Updater).scheduleUpdateTask()
+
+        // start automated backups
+        ProtoBackupExport.scheduleAutomatedBackupTask()
+
+        // start DownloadManager and restore + resume downloads
+        DownloadManager.restoreAndResumeDownloads()
+    }
+
+    if (runtimeOnly) {
+        startDeferredRuntimeOnlyServices(applicationDirs, deferEmbeddedLoggerInit)
+        RuntimeStartupMetrics.logStage("runtime_only_background_services_started")
+    } else if (deferEmbeddedLoggerInit) {
+        startDeferredLoggerInitialization(applicationDirs)
+        RuntimeStartupMetrics.logStage("logger_init_background_started")
+    }
 }

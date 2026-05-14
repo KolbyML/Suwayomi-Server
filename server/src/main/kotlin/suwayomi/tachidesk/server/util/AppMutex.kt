@@ -13,6 +13,7 @@ import io.javalin.json.fromJsonString
 import okhttp3.OkHttpClient
 import okhttp3.Request.Builder
 import suwayomi.tachidesk.global.impl.AboutDataClass
+import suwayomi.tachidesk.server.RuntimeMode
 import suwayomi.tachidesk.server.serverConfig
 import suwayomi.tachidesk.server.util.Browser.openInBrowser
 import suwayomi.tachidesk.server.util.ExitCode.MutexCheckFailedAnotherAppRunning
@@ -32,11 +33,15 @@ object AppMutex {
         OtherApplicationRunning(2),
     }
 
-    private val appIP = if (serverConfig.ip.value == "0.0.0.0") "127.0.0.1" else serverConfig.ip.value
-
     private val jsonMapper: JsonMapper by injectLazy()
 
+    private fun appIP(): String {
+        val configuredIp = serverConfig.ip.value
+        return if (configuredIp == "0.0.0.0") "127.0.0.1" else configuredIp
+    }
+
     private fun checkAppMutex(): AppMutexState {
+        val appIP = appIP()
         val client =
             OkHttpClient
                 .Builder()
@@ -68,12 +73,26 @@ object AppMutex {
     }
 
     fun handleAppMutex() {
+        if (System.getProperty("suwayomi.skipAppMutex")?.toBoolean() == true ||
+            System.getenv("SUWAYOMI_SKIP_APP_MUTEX")?.toBoolean() == true
+        ) {
+            logger.info { "Skipping app mutex check" }
+            return
+        }
+
+        val hasEmbeddedManifest = !System.getProperty("manatan.runtimeBootstrapManifest").isNullOrBlank()
+        if (RuntimeMode.isRuntimeOnly() && hasEmbeddedManifest) {
+            logger.info { "Skipping app mutex check for embedded runtime-only startup" }
+            return
+        }
+
         when (checkAppMutex()) {
             AppMutexState.Clear -> {
                 logger.info { "Mutex status is clear, Resuming startup." }
             }
 
             AppMutexState.TachideskInstanceRunning -> {
+                val appIP = appIP()
                 logger.info { "Another instance of Suwayomi-Server is running on $appIP:${serverConfig.port.value}" }
 
                 logger.info { "Probably user thought Suwayomi-Server is closed so, opening webUI in browser again." }
@@ -85,6 +104,7 @@ object AppMutex {
             }
 
             AppMutexState.OtherApplicationRunning -> {
+                val appIP = appIP()
                 logger.error { "A non Suwayomi-Server application is running on $appIP:${serverConfig.port.value}, aborting startup." }
                 shutdownApp(MutexCheckFailedAnotherAppRunning)
             }

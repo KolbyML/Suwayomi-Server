@@ -30,8 +30,8 @@ public class Build {
     public static final String HARDWARE = null;
     public static final String HOST = null;
     public static final String ID = null;
-    public static final String MANUFACTURER = null;
-    public static final String MODEL = null;
+    public static final String MANUFACTURER = "unknown";
+    public static final String MODEL = "unknown";
     public static final String PRODUCT = null;
     /** @deprecated */
     @Deprecated
@@ -88,7 +88,7 @@ public class Build {
         public static final String CODENAME = null;
         public static final String INCREMENTAL = null;
         public static final int PREVIEW_SDK_INT = 0;
-        public static final String RELEASE = null;
+        public static final String RELEASE = "unknown";
         /** @deprecated */
         @Deprecated
         public static final String SDK = null;

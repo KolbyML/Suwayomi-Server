@@ -52,9 +52,7 @@ dependencies {
 
     // Exposed ORM
     implementation(libs.bundles.exposed)
-    implementation(libs.postgres)
-    implementation(libs.h2)
-    implementation(libs.hikaricp)
+    implementation(libs.sqlite.jdbc)
 
     // Exposed Migrations
     implementation(libs.exposed.migrations)
@@ -109,12 +107,22 @@ dependencies {
 
     implementation(libs.jwt)
 
+    // Native QuickJS runtime for evaluating extension JavaScript
+    implementation(libs.quickjs.jvm)
+
     compileOnly(libs.kte)
 }
 
 jte {
     generate()
 }
+
+fun overlayPaths(propertyName: String): List<String> =
+    providers.gradleProperty(propertyName).orNull
+        ?.split(File.pathSeparator, ",")
+        ?.map { it.trim() }
+        ?.filter { it.isNotEmpty() }
+        .orEmpty()
 
 application {
     applicationDefaultJvmArgs =
@@ -129,14 +137,26 @@ sourceSets {
         resources {
             srcDir("src/main/resources")
             srcDir("build/generated/src/main/resources")
+            overlayPaths("manatanOverlayResources").forEach { srcDir(it) }
         }
         kotlin {
             srcDir("build/generated/src/main/kotlin")
+            overlayPaths("manatanOverlaySources").forEach { srcDir(it) }
+        }
+        java {
+            overlayPaths("manatanOverlayJavaSources").forEach { srcDir(it) }
         }
     }
     test {
         resources {
             srcDir("build/generated/src/test/resources")
+            overlayPaths("manatanOverlayTestResources").forEach { srcDir(it) }
+        }
+        kotlin {
+            overlayPaths("manatanOverlayTestSources").forEach { srcDir(it) }
+        }
+        java {
+            overlayPaths("manatanOverlayTestJavaSources").forEach { srcDir(it) }
         }
     }
 }

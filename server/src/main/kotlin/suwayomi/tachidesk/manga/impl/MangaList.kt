@@ -15,13 +15,17 @@ import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.BatchUpdateStatement
 import org.jetbrains.exposed.sql.transactions.transaction
+import io.github.oshai.kotlinlogging.KotlinLogging
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource.getCatalogueSourceOrStub
+import suwayomi.tachidesk.manga.impl.util.source.StubSource
 import suwayomi.tachidesk.manga.model.dataclass.PagedMangaListDataClass
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.toDataClass
 import java.time.Instant
 
 object MangaList {
+    private val logger = KotlinLogging.logger {}
+
     fun proxyThumbnailUrl(mangaId: Int): String = "/api/v1/manga/$mangaId/thumbnail"
 
     suspend fun getMangaList(
@@ -33,6 +37,13 @@ object MangaList {
             "pageNum = $pageNum is not in valid range"
         }
         val source = getCatalogueSourceOrStub(sourceId)
+        if (source is StubSource) {
+            logger.warn { "getMangaList using StubSource sourceId=$sourceId page=$pageNum popular=$popular" }
+        } else {
+            logger.info {
+                "getMangaList sourceId=$sourceId page=$pageNum popular=$popular source=${source.name} class=${source::class.java.name} supportsLatest=${source.supportsLatest}"
+            }
+        }
         val mangasPage =
             if (popular) {
                 source.getPopularManga(pageNum)
@@ -43,6 +54,9 @@ object MangaList {
                     throw Exception("Source $source doesn't support latest")
                 }
             }
+        logger.info {
+            "getMangaList fetched=${mangasPage.mangas.size} sourceId=$sourceId page=$pageNum popular=$popular hasNext=${mangasPage.hasNextPage}"
+        }
         return mangasPage.processEntries(sourceId)
     }
 
@@ -58,6 +72,16 @@ object MangaList {
             val existingMangaUrls = existingMangaUrlsToId.map { it.key }
 
             val mangasToInsert = mangas.filter { !existingMangaUrls.contains(it.url) }
+            if (mangasToInsert.isNotEmpty()) {
+                val samples = mangasToInsert.take(3).map { manga ->
+                    "${manga.url}:${manga.title}"
+                }
+                logger.info {
+                    "insertOrUpdate sourceId=$sourceId existing=${existingMangaUrlsToId.size} insert=${mangasToInsert.size} samples=$samples"
+                }
+            } else {
+                logger.info { "insertOrUpdate sourceId=$sourceId existing=${existingMangaUrlsToId.size} insert=0" }
+            }
 
             val insertedMangaUrlsToId =
                 MangaTable
@@ -86,6 +110,10 @@ object MangaList {
                     }.filterNot { (_, resultRow) ->
                         resultRow[MangaTable.inLibrary] && resultRow[MangaTable.sourceReference] != LocalSource.ID
                     }
+
+            if (mangaToUpdate.isNotEmpty()) {
+                logger.info { "insertOrUpdate sourceId=$sourceId update=${mangaToUpdate.size}" }
+            }
 
             if (mangaToUpdate.isNotEmpty()) {
                 BatchUpdateStatement(MangaTable).apply {
@@ -128,6 +156,13 @@ object MangaList {
                 val mangaIds = insertOrUpdate(sourceId)
                 return@transaction MangaTable.selectAll().where { MangaTable.id inList mangaIds }.map { MangaTable.toDataClass(it) }
             }
+        val expected = sourceId.toString()
+        val mismatched = mangaList.map { it.sourceId }.distinct().filter { it != expected }
+        if (mismatched.isNotEmpty()) {
+            logger.warn {
+                "processEntries sourceId mismatch expected=$expected mismatched=${mismatched.take(3)} count=${mangaList.size}"
+            }
+        }
         return PagedMangaListDataClass(
             mangaList,
             mangasPage.hasNextPage,

@@ -13,6 +13,29 @@ public class Toast {
 
     private CharSequence text;
 
+    private static final ThreadLocal<java.util.ArrayList<String>> CAPTURE = new ThreadLocal<>();
+
+    public static void beginCapture() {
+        CAPTURE.set(new java.util.ArrayList<>());
+    }
+
+    public static java.util.List<String> endCapture() {
+        java.util.ArrayList<String> captured = CAPTURE.get();
+        CAPTURE.remove();
+        if (captured == null) {
+            return java.util.Collections.emptyList();
+        }
+        return captured;
+    }
+
+    private static void captureToast(CharSequence text) {
+        java.util.ArrayList<String> captured = CAPTURE.get();
+        if (captured == null) {
+            return;
+        }
+        captured.add(text == null ? "" : text.toString());
+    }
+
     private Toast(CharSequence text) {
         this.text = text;
     }
@@ -22,7 +45,8 @@ public class Toast {
     }
 
     public void show() {
-        System.out.printf("made a Toast: \"%s\"\n", text.toString());
+        System.out.printf("made a Toast: \"%s\"\n", text == null ? "" : text.toString());
+        captureToast(text);
     }
 
     public void cancel() {

@@ -12,7 +12,6 @@ import eu.kanade.tachiyomi.createAppModule
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.source.local.LocalSource
 import io.github.oshai.kotlinlogging.KotlinLogging
-import org.jetbrains.exposed.sql.Database
 import org.junit.jupiter.api.BeforeAll
 import org.koin.core.context.startKoin
 import suwayomi.tachidesk.server.ApplicationDirs
@@ -22,7 +21,8 @@ import suwayomi.tachidesk.server.androidCompat
 import suwayomi.tachidesk.server.database.databaseUp
 import suwayomi.tachidesk.server.serverConfig
 import suwayomi.tachidesk.server.serverModule
-import suwayomi.tachidesk.server.util.AppMutex.handleAppMutex
+import suwayomi.tachidesk.server.settings.SettingsRegistry
+import suwayomi.tachidesk.server.util.ConfigTypeRegistration
 import suwayomi.tachidesk.server.util.SystemTray
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
@@ -55,27 +55,35 @@ open class ApplicationTest {
         private var initializedTheApp = false
 
         fun testingSetup() {
+            System.setProperty("suwayomi.skipAppMutex", "true")
+
+            ConfigTypeRegistration.registerCustomTypes()
+            SettingsRegistry.resetForTests()
+
+            // register Tachidesk's config which is dubbed "ServerConfig"
+            GlobalConfigManager.registerModule(
+                ServerConfig.register { GlobalConfigManager.config },
+            )
+
             // Application dirs
             val applicationDirs = ApplicationDirs()
 
             logger.debug { "Data Root directory is set to: ${applicationDirs.dataRoot}" }
 
             // make dirs we need
+            val dataRoot = applicationDirs.dataRoot
             listOf(
-                applicationDirs.dataRoot,
+                dataRoot,
                 applicationDirs.extensionsRoot,
                 applicationDirs.extensionsRoot + "/icon",
                 applicationDirs.tempThumbnailCacheRoot,
-                applicationDirs.downloadsRoot,
-                applicationDirs.localMangaRoot,
+                "$dataRoot/downloads",
+                "$dataRoot/local",
+                "$dataRoot/localanime",
+                "$dataRoot/backups",
             ).forEach {
                 File(it).mkdirs()
             }
-
-            // register Tachidesk's config which is dubbed "ServerConfig"
-            GlobalConfigManager.registerModule(
-                ServerConfig.register { GlobalConfigManager.config },
-            )
 
             // initialize Koin modules
             val app = App()
@@ -87,9 +95,6 @@ open class ApplicationTest {
                     serverModule(applicationDirs),
                 )
             }
-
-            // Make sure only one instance of the app is running
-            handleAppMutex()
 
             // Load Android compatibility dependencies
             AndroidCompatInitializer().init()
@@ -154,10 +159,7 @@ open class ApplicationTest {
             // fixes #119 , ref: https://github.com/Suwayomi/Suwayomi-Server/issues/119#issuecomment-894681292 , source Id calculation depends on String.lowercase()
             Locale.setDefault(Locale.ENGLISH)
 
-            // in-memory database, don't discard database between connections/transactions
-            val db = Database.connect("jdbc:h2:mem:test;DB_CLOSE_DELAY=-1;", "org.h2.Driver")
-
-            databaseUp(db)
+            databaseUp()
 
             LocalSource.register()
         }

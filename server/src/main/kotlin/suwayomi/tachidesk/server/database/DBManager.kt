@@ -7,78 +7,154 @@ package suwayomi.tachidesk.server.database
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import com.zaxxer.hikari.HikariConfig
-import com.zaxxer.hikari.HikariDataSource
-import de.neonew.exposed.migrations.loadMigrationsFrom
-import de.neonew.exposed.migrations.runMigrations
 import io.github.oshai.kotlinlogging.KotlinLogging
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.DatabaseConfig
 import org.jetbrains.exposed.sql.ExperimentalKeywordApi
-import org.jetbrains.exposed.sql.Schema
 import org.jetbrains.exposed.sql.SchemaUtils
+import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
-import suwayomi.tachidesk.graphql.types.DatabaseType
+import suwayomi.tachidesk.global.model.table.GlobalMetaTable
+import suwayomi.tachidesk.manga.model.table.CategoryMangaTable
+import suwayomi.tachidesk.manga.model.table.CategoryMetaTable
+import suwayomi.tachidesk.manga.model.table.CategoryTable
+import suwayomi.tachidesk.manga.model.table.ChapterMetaTable
+import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.manga.model.table.ExtensionTable
+import suwayomi.tachidesk.manga.model.table.MangaMetaTable
+import suwayomi.tachidesk.manga.model.table.MangaTable
+import suwayomi.tachidesk.manga.model.table.PageTable
+import suwayomi.tachidesk.manga.model.table.SourceMetaTable
+import suwayomi.tachidesk.manga.model.table.SourceTable
+import suwayomi.tachidesk.manga.model.table.TrackRecordTable
+import suwayomi.tachidesk.manga.model.table.TrackSearchTable
 import suwayomi.tachidesk.server.ApplicationDirs
-import suwayomi.tachidesk.server.ServerConfig
-import suwayomi.tachidesk.server.serverConfig
+import suwayomi.tachidesk.server.RuntimeStartupMetrics
+import suwayomi.tachidesk.server.plugin.ServerPluginRegistry
 import suwayomi.tachidesk.server.util.ExitCode
 import suwayomi.tachidesk.server.util.shutdownApp
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.sql.SQLException
-import kotlin.time.Duration.Companion.minutes
-import kotlin.time.Duration.Companion.seconds
+import java.security.MessageDigest
+import java.util.Properties
 
 object DBManager {
     var db: Database? = null
         private set
 
-    @Volatile
-    private var hikariDataSource: HikariDataSource? = null
+    data class RuntimeDatabaseSetup(
+        val database: Database,
+        val runtimePath: Path,
+        val templatePath: Path,
+        val restoredFromTemplate: Boolean,
+        val reusedBootstrapCache: Boolean,
+        val bootstrapCacheMarkerPath: Path,
+        val manifestFingerprint: String?,
+    )
 
-    private fun createHikariDataSource(): HikariDataSource {
-        val applicationDirs = Injekt.get<ApplicationDirs>()
-        val config =
-            HikariConfig().apply {
-                when (serverConfig.databaseType.value) {
-                    DatabaseType.POSTGRESQL -> {
-                        jdbcUrl = "jdbc:${serverConfig.databaseUrl.value}"
-                        driverClassName = "org.postgresql.Driver"
-                        username = serverConfig.databaseUsername.value
-                        password = serverConfig.databasePassword.value
-                        // PostgreSQL specific optimizations
-                        addDataSourceProperty("cachePrepStmts", "true")
-                        addDataSourceProperty("useServerPrepStmts", "true")
-                    }
+    private const val RUNTIME_SCHEMA_TEMPLATE_VERSION = 1
+    private const val RUNTIME_BOOTSTRAP_CACHE_VERSION = 1
+    private const val RUNTIME_BOOTSTRAP_CACHE_VERSION_KEY = "version"
+    private const val RUNTIME_BOOTSTRAP_CACHE_MANIFEST_HASH_KEY = "manifestSha256"
+    private var currentRuntimeSetup: RuntimeDatabaseSetup? = null
 
-                    DatabaseType.H2 -> {
-                        jdbcUrl = "jdbc:h2:${applicationDirs.dataRoot}/database"
-                        driverClassName = "org.h2.Driver"
-                        // H2 specific optimizations
-                        addDataSourceProperty("cachePrepStmts", "true")
-                        addDataSourceProperty("prepStmtCacheSize", "25")
-                        addDataSourceProperty("prepStmtCacheSqlLimit", "256")
+    private fun persistentDatabasePath(): Path = Path.of(Injekt.get<ApplicationDirs>().dataRoot, "database.sqlite")
+
+    private fun runtimeDatabasePath(): Path = Path.of(Injekt.get<ApplicationDirs>().dataRoot, "runtime.sqlite")
+
+    private fun runtimeTemplatePath(): Path =
+        Path.of(
+            Injekt.get<ApplicationDirs>().dataRoot,
+            "runtime-template-v$RUNTIME_SCHEMA_TEMPLATE_VERSION.sqlite",
+        )
+
+    private fun runtimeBootstrapCacheMarkerPath(): Path =
+        Path.of(
+            Injekt.get<ApplicationDirs>().dataRoot,
+            "runtime-bootstrap-cache-v$RUNTIME_BOOTSTRAP_CACHE_VERSION.properties",
+        )
+
+    private fun sqliteJdbcUrl(
+        path: Path,
+        journalMode: String,
+        synchronous: String,
+    ): String =
+        "jdbc:sqlite:${path.toAbsolutePath()}?busy_timeout=10000&foreign_keys=on&journal_mode=$journalMode&synchronous=$synchronous"
+
+    private fun currentRuntimeManifestFingerprint(): String? {
+        val manifestPathString = System.getProperty("manatan.runtimeBootstrapManifest")?.trim().orEmpty()
+        if (manifestPathString.isBlank()) {
+            return null
+        }
+
+        val manifestPath = Path.of(manifestPathString)
+        if (!Files.exists(manifestPath)) {
+            return null
+        }
+
+        val digest = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(manifestPath).use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+
+        return digest.digest().joinToString(separator = "") { byte -> "%02x".format(byte) }
+    }
+
+    private fun readBootstrapCacheFingerprint(markerPath: Path): String? {
+        if (!Files.exists(markerPath)) {
+            return null
+        }
+
+        return try {
+            Files.newInputStream(markerPath).use { input ->
+                Properties().apply { load(input) }.let { props ->
+                    val version = props.getProperty(RUNTIME_BOOTSTRAP_CACHE_VERSION_KEY)
+                    if (version != RUNTIME_BOOTSTRAP_CACHE_VERSION.toString()) {
+                        null
+                    } else {
+                        props.getProperty(RUNTIME_BOOTSTRAP_CACHE_MANIFEST_HASH_KEY)?.trim()?.ifBlank { null }
                     }
                 }
-
-                // Optimized for Raspberry Pi / Low memory environments
-                maximumPoolSize = 6 // Moderate pool for better concurrency
-                connectionTimeout = 45.seconds.inWholeMilliseconds // more tolerance for slow devices
-                idleTimeout = 5.minutes.inWholeMilliseconds // close idle connections faster
-                maxLifetime = 15.minutes.inWholeMilliseconds // recycle connections more often
-                leakDetectionThreshold = 1.minutes.inWholeMilliseconds
-                isAutoCommit = false
-
-                // Pool name for monitoring
-                poolName = "Suwayomi-DB-Pool"
             }
-        return HikariDataSource(config)
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to read runtime bootstrap cache marker from $markerPath" }
+            null
+        }
+    }
+
+    private fun writeBootstrapCacheMarker(
+        markerPath: Path,
+        manifestFingerprint: String,
+    ) {
+        Files.createDirectories(markerPath.parent)
+        Files.newOutputStream(markerPath).use { output ->
+            Properties().apply {
+                setProperty(RUNTIME_BOOTSTRAP_CACHE_VERSION_KEY, RUNTIME_BOOTSTRAP_CACHE_VERSION.toString())
+                setProperty(RUNTIME_BOOTSTRAP_CACHE_MANIFEST_HASH_KEY, manifestFingerprint)
+                store(output, "Runtime bootstrap cache marker")
+            }
+        }
+    }
+
+    private fun clearBootstrapCacheMarker(markerPath: Path) {
+        try {
+            Files.deleteIfExists(markerPath)
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to clear runtime bootstrap cache marker at $markerPath" }
+        }
     }
 
     fun setupDatabase(): Database {
-        // Clean up existing connections
         if (TransactionManager.isInitialized()) {
             val currentDatabase = TransactionManager.currentOrNull()?.db
             if (currentDatabase != null) {
@@ -86,59 +162,181 @@ object DBManager {
             }
         }
 
-        // Close the existing pool if any
-        shutdown()
-
         val dbConfig =
             DatabaseConfig {
-                useNestedTransactions = true
+                useNestedTransactions = false
                 @OptIn(ExperimentalKeywordApi::class)
                 preserveKeywordCasing = false
             }
 
-        return if (serverConfig.useHikariConnectionPool.value) {
-            // Create a new HikariCP pool
-            hikariDataSource = createHikariDataSource()
+        val jdbcUrl = sqliteJdbcUrl(persistentDatabasePath(), journalMode = "WAL", synchronous = "NORMAL")
 
-            return Database
-                .connect(hikariDataSource!!, databaseConfig = dbConfig)
-        } else {
-            when (serverConfig.databaseType.value) {
-                DatabaseType.POSTGRESQL -> {
-                    Database.connect(
-                        "jdbc:${serverConfig.databaseUrl.value}",
-                        "org.postgresql.Driver",
-                        user = serverConfig.databaseUsername.value,
-                        password = serverConfig.databasePassword.value,
-                        databaseConfig = dbConfig,
-                    )
-                }
-
-                DatabaseType.H2 -> {
-                    Database.connect(
-                        "jdbc:h2:${Injekt.get<ApplicationDirs>().dataRoot}/database",
-                        "org.h2.Driver",
-                        databaseConfig = dbConfig,
-                    )
-                }
-            }
-        }.also { db = it }
+        return Database.connect(
+            jdbcUrl,
+            "org.sqlite.JDBC",
+            databaseConfig = dbConfig,
+        ).also { db = it }
     }
 
-    fun shutdown() {
-        hikariDataSource?.close()
-        hikariDataSource = null
-    }
+    private fun prepareRuntimeDatabaseFile(
+        runtimePath: Path,
+        templatePath: Path,
+    ): Boolean {
+        Files.createDirectories(runtimePath.parent)
+        Files.deleteIfExists(runtimePath)
 
-    fun getPoolStats(): String? =
-        hikariDataSource?.let { ds ->
-            "DB Pool Stats - Active: ${ds.hikariPoolMXBean.activeConnections}, " +
-                "Idle: ${ds.hikariPoolMXBean.idleConnections}, " +
-                "Waiting: ${ds.hikariPoolMXBean.threadsAwaitingConnection}"
+        if (!Files.exists(templatePath)) {
+            return false
         }
+
+        return try {
+            Files.copy(templatePath, runtimePath, StandardCopyOption.REPLACE_EXISTING)
+            true
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to restore runtime SQLite template from $templatePath" }
+            Files.deleteIfExists(runtimePath)
+            false
+        }
+    }
+
+    fun setupRuntimeDatabase(): RuntimeDatabaseSetup {
+        if (TransactionManager.isInitialized()) {
+            val currentDatabase = TransactionManager.currentOrNull()?.db
+            if (currentDatabase != null) {
+                TransactionManager.closeAndUnregister(currentDatabase)
+            }
+        }
+
+        val dbConfig =
+            DatabaseConfig {
+                useNestedTransactions = false
+                @OptIn(ExperimentalKeywordApi::class)
+                preserveKeywordCasing = false
+            }
+
+        val runtimePath = runtimeDatabasePath()
+        val templatePath = runtimeTemplatePath()
+        val bootstrapCacheMarkerPath = runtimeBootstrapCacheMarkerPath()
+        val manifestFingerprint = currentRuntimeManifestFingerprint()
+        val cachedBootstrapFingerprint = readBootstrapCacheFingerprint(bootstrapCacheMarkerPath)
+        val reusedBootstrapCache =
+            manifestFingerprint != null &&
+                cachedBootstrapFingerprint == manifestFingerprint &&
+                Files.exists(runtimePath)
+        val restoredFromTemplate =
+            if (reusedBootstrapCache) {
+                false
+            } else {
+                clearBootstrapCacheMarker(bootstrapCacheMarkerPath)
+                prepareRuntimeDatabaseFile(runtimePath, templatePath)
+            }
+        val jdbcUrl = sqliteJdbcUrl(runtimePath, journalMode = "MEMORY", synchronous = "OFF")
+
+        val database =
+            Database.connect(
+                jdbcUrl,
+                "org.sqlite.JDBC",
+                databaseConfig = dbConfig,
+            ).also { db = it }
+
+        return RuntimeDatabaseSetup(
+            database = database,
+            runtimePath = runtimePath,
+            templatePath = templatePath,
+            restoredFromTemplate = restoredFromTemplate,
+            reusedBootstrapCache = reusedBootstrapCache,
+            bootstrapCacheMarkerPath = bootstrapCacheMarkerPath,
+            manifestFingerprint = manifestFingerprint,
+        )
+            .also { currentRuntimeSetup = it }
+    }
+
+
+    fun shutdown() = Unit
+
+    fun getPoolStats(): String? = null
+
+    fun shouldReuseRuntimeBootstrap(): Boolean = currentRuntimeSetup?.reusedBootstrapCache == true
+
+    fun markRuntimeBootstrapReady() {
+        val runtimeSetup = currentRuntimeSetup ?: return
+        val manifestFingerprint = runtimeSetup.manifestFingerprint ?: return
+
+        try {
+            writeBootstrapCacheMarker(runtimeSetup.bootstrapCacheMarkerPath, manifestFingerprint)
+            logger.info {
+                "Marked runtime bootstrap cache ready marker=${runtimeSetup.bootstrapCacheMarkerPath} manifestFingerprint=$manifestFingerprint"
+            }
+        } catch (e: Exception) {
+            logger.warn(e) {
+                "Failed to write runtime bootstrap cache marker marker=${runtimeSetup.bootstrapCacheMarkerPath}"
+            }
+        }
+    }
 }
 
 private val logger = KotlinLogging.logger {}
+
+private val schemaTables: Array<Table>
+    get() =
+        arrayOf<Table>(
+        ExtensionTable,
+        SourceTable,
+        SourceMetaTable,
+        CategoryTable,
+        CategoryMetaTable,
+        MangaTable,
+        MangaMetaTable,
+        ChapterTable,
+        ChapterMetaTable,
+        PageTable,
+        CategoryMangaTable,
+        TrackRecordTable,
+        TrackSearchTable,
+        GlobalMetaTable,
+    ) + ServerPluginRegistry.plugins.flatMap { it.databaseTables() }
+
+private val supplementalIndexStatements =
+    listOf(
+        """CREATE INDEX IF NOT EXISTS idx_chapter_last_read_at ON Chapter(last_read_at);""",
+        """CREATE INDEX IF NOT EXISTS Chapter_idx_manga ON Chapter(manga);""",
+        """CREATE INDEX IF NOT EXISTS Manga_idx_in_library ON Manga(in_library);""",
+        """CREATE INDEX IF NOT EXISTS Manga_idx_source ON Manga(source);""",
+        """CREATE INDEX IF NOT EXISTS Page_idx_chapter ON Page(chapter);""",
+        """CREATE INDEX IF NOT EXISTS CategoryManga_idx_manga ON CategoryManga(manga);""",
+        """CREATE INDEX IF NOT EXISTS CategoryManga_idx_category ON CategoryManga(category);""",
+        """CREATE INDEX IF NOT EXISTS CategoryMeta_idx_category_ref ON CategoryMeta(category_ref);""",
+        """CREATE INDEX IF NOT EXISTS ChapterMeta_idx_chapter_ref ON ChapterMeta(chapter_ref);""",
+        """CREATE INDEX IF NOT EXISTS MangaMeta_idx_manga_ref ON MangaMeta(manga_ref);""",
+    )
+
+private fun seedSchema() {
+    transaction {
+        supplementalIndexStatements.forEach { exec(it) }
+        exec(
+            """
+            INSERT OR IGNORE INTO Category (id, name, sort_order, is_default, include_in_update, include_in_download)
+            VALUES (0, 'Default', 0, 1, -1, -1);
+            """.trimIndent(),
+        )
+    }
+}
+
+private fun initializeSchema() {
+    transaction {
+        SchemaUtils.createMissingTablesAndColumns(*schemaTables)
+    }
+    seedSchema()
+}
+
+private fun initializeRuntimeSchema() {
+    transaction {
+        // Runtime SQLite is recreated from scratch on every launch, so avoid
+        // migration-style ALTER statements that Exposed may emit for SQLite.
+        SchemaUtils.create(*schemaTables)
+    }
+    seedSchema()
+}
 
 fun databaseUp() {
     val db =
@@ -153,35 +351,75 @@ fun databaseUp() {
         "Using ${db.vendor} database version ${db.version}"
     }
 
-    // Log pool statistics
-    DBManager.getPoolStats()?.let { stats ->
-        logger.debug { "HikariCP initialized: $stats" }
-    }
-
-    // Add shutdown hook to properly close HikariCP pool
     Runtime.getRuntime().addShutdownHook(
         Thread {
-            logger.debug { "Shutting down HikariCP connection pool..." }
             DBManager.shutdown()
         },
     )
 
     try {
-        if (serverConfig.databaseType.value == DatabaseType.POSTGRESQL) {
-            transaction {
-                val schema =
-                    Schema(
-                        "suwayomi",
-                        serverConfig.databaseUsername.value.takeIf { it.isNotBlank() },
-                    )
-                SchemaUtils.createSchema(schema)
-                SchemaUtils.setSchema(schema)
+        initializeSchema()
+    } catch (e: SQLException) {
+        logger.error(e) { "Error initializing SQLite database schema" }
+        if (System.getProperty("crashOnFailedMigration").toBoolean()) {
+            shutdownApp(ExitCode.DbMigrationFailure)
+        }
+    }
+}
+
+fun databaseUpRuntime() {
+    RuntimeStartupMetrics.logStage("runtime_database_connect_begin")
+    val runtimeSetup =
+        try {
+            DBManager.setupRuntimeDatabase()
+        } catch (e: Exception) {
+            logger.error(e) { "Failed to setup runtime database" }
+            return
+        }
+    RuntimeStartupMetrics.logStage("runtime_database_connected")
+    val db = runtimeSetup.database
+
+    logger.info {
+        "Using ${db.vendor} in-memory runtime database templateRestored=${runtimeSetup.restoredFromTemplate} cacheReused=${runtimeSetup.reusedBootstrapCache}"
+    }
+
+    try {
+        if (runtimeSetup.reusedBootstrapCache) {
+            RuntimeStartupMetrics.logStage("runtime_bootstrap_cache_reused")
+            logger.info {
+                "Reusing cached runtime bootstrap database path=${runtimeSetup.runtimePath} marker=${runtimeSetup.bootstrapCacheMarkerPath}"
+            }
+        } else if (runtimeSetup.restoredFromTemplate) {
+            RuntimeStartupMetrics.logStage("runtime_schema_template_restore_complete")
+            logger.info {
+                "Restored runtime SQLite schema template path=${runtimeSetup.templatePath} tableCount=${schemaTables.size}"
+            }
+        } else {
+            val schemaInitStartedAt = System.nanoTime()
+            RuntimeStartupMetrics.logStage("runtime_schema_create_begin")
+            initializeRuntimeSchema()
+            RuntimeStartupMetrics.logStage("runtime_schema_create_complete")
+            logger.info {
+                "Initialized runtime SQLite schema directly tableCount=${schemaTables.size} elapsedMs=${(System.nanoTime() - schemaInitStartedAt) / 1_000_000}"
+            }
+
+            try {
+                Files.copy(
+                    runtimeSetup.runtimePath,
+                    runtimeSetup.templatePath,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+                logger.info {
+                    "Cached runtime SQLite schema template path=${runtimeSetup.templatePath}"
+                }
+            } catch (e: Exception) {
+                logger.warn(e) {
+                    "Failed to cache runtime SQLite schema template path=${runtimeSetup.templatePath}"
+                }
             }
         }
-        val migrations = loadMigrationsFrom("suwayomi.tachidesk.server.database.migration", ServerConfig::class.java)
-        runMigrations(migrations)
     } catch (e: SQLException) {
-        logger.error(e) { "Error up-to-database migration" }
+        logger.error(e) { "Error up-to-runtime database migration" }
         if (System.getProperty("crashOnFailedMigration").toBoolean()) {
             shutdownApp(ExitCode.DbMigrationFailure)
         }

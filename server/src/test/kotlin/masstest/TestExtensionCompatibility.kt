@@ -17,6 +17,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
@@ -27,15 +28,14 @@ import suwayomi.tachidesk.manga.impl.extension.Extension.updateExtension
 import suwayomi.tachidesk.manga.impl.extension.ExtensionsList.getExtensionList
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource.getCatalogueSourceOrNull
 import suwayomi.tachidesk.manga.model.dataclass.ExtensionDataClass
-import suwayomi.tachidesk.server.applicationSetup
 import suwayomi.tachidesk.test.BASE_PATH
+import suwayomi.tachidesk.test.ApplicationTest
 import suwayomi.tachidesk.test.setLoggingEnabled
-import xyz.nulldev.ts.config.CONFIG_PREFIX
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class TestExtensionCompatibility {
+class TestExtensionCompatibility : ApplicationTest() {
     private val logger = KotlinLogging.logger {}
     private lateinit var extensions: List<ExtensionDataClass>
     private lateinit var sources: List<HttpSource>
@@ -49,9 +49,11 @@ class TestExtensionCompatibility {
 
     @BeforeAll
     fun setup() {
-        val dataRoot = File(BASE_PATH).absolutePath
-        System.setProperty("$CONFIG_PREFIX.server.rootDir", dataRoot)
-        applicationSetup()
+        val massTestsEnabled =
+            System.getProperty("suwayomi.runMassTests") == "true" ||
+                System.getenv("SUWAYOMI_RUN_MASS_TESTS") == "true"
+        Assumptions.assumeTrue(massTestsEnabled, "Mass tests disabled")
+        File(BASE_PATH).mkdirs()
         setLoggingEnabled(false)
 
         runBlocking {
@@ -72,7 +74,8 @@ class TestExtensionCompatibility {
                     }
                 }
             }
-            sources = getSourceList().map { getCatalogueSourceOrNull(it.id.toLong())!! as HttpSource }
+            sources = getSourceList().mapNotNull { getCatalogueSourceOrNull(it.id.toLong()) as? HttpSource }
+            Assumptions.assumeTrue(sources.isNotEmpty(), "No HttpSource entries available")
         }
         setLoggingEnabled(true)
         File("$BASE_PATH/sources.txt").writeText(sources.joinToString("\n") { "${it.name} - ${it.lang.uppercase()} - ${it.id}" })

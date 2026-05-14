@@ -28,6 +28,7 @@ import java.net.URL
 import java.net.URLClassLoader
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.io.path.Path
 import kotlin.io.path.relativeTo
@@ -42,6 +43,8 @@ object PackageTools {
     const val METADATA_NSFW = "tachiyomi.extension.nsfw"
     const val LIB_VERSION_MIN = 1.3
     const val LIB_VERSION_MAX = 1.5
+    private const val ANIME_METADATA_SOURCE_CLASS = "tachiyomi.animeextension.class"
+    private const val ANIME_METADATA_SOURCE_FACTORY = "tachiyomi.animeextension.factory"
 
     /**
      * Convert dex to jar, a wrapper for the dex2jar library
@@ -55,6 +58,8 @@ object PackageTools {
         // source at: https://github.com/DexPatcher/dex2jar/tree/v2.1-20190905-lanchon/dex-tools/src/main/java/com/googlecode/dex2jar/tools/Dex2jarCmd.java
 
         val jarFilePath = File(jarFile).toPath()
+        clearJarLoader(jarFile)
+        Files.deleteIfExists(jarFilePath)
         val reader = MultiDexFileReader.open(Files.readAllBytes(File(dexFile).toPath()))
         val handler = BaksmaliBaseDexExceptionHandler()
         Dex2jar
@@ -86,6 +91,7 @@ object PackageTools {
         } else {
             BytecodeEditor.fixAndroidClasses(jarFilePath)
         }
+        clearJarLoader(jarFile)
     }
 
     /** A modified version of `xyz.nulldev.androidcompat.pm.InstalledPackage.info` */
@@ -135,6 +141,57 @@ object PackageTools {
         }
     }
 
+    fun deriveExtensionClassName(
+        apkPath: String,
+        pkgName: String,
+        isAnime: Boolean,
+    ): String? {
+        val apkFile = File(apkPath)
+        if (!apkFile.isFile) {
+            return null
+        }
+
+        val packageInfo =
+            runCatching { getPackageInfo(apkFile.absolutePath) }
+                .onFailure { error ->
+                    logger.warn(error) { "Failed to derive class name from ${apkFile.name}" }
+                }.getOrNull() ?: return null
+        val metaData = packageInfo.applicationInfo.metaData ?: return null
+        val classNameSuffix =
+            if (isAnime) {
+                metaData.getString(ANIME_METADATA_SOURCE_CLASS)
+                    ?: metaData.getString(ANIME_METADATA_SOURCE_FACTORY)
+                    ?: metaData.getString(METADATA_SOURCE_CLASS)
+                    ?: metaData.getString(METADATA_SOURCE_FACTORY)
+            } else {
+                metaData.getString(METADATA_SOURCE_CLASS)
+                    ?: metaData.getString(METADATA_SOURCE_FACTORY)
+            }?.trim().orEmpty()
+        if (classNameSuffix.isBlank()) {
+            return null
+        }
+
+        return normalizeExtensionClassName(pkgName, classNameSuffix)
+    }
+
+    fun normalizeExtensionClassName(
+        pkgName: String,
+        className: String,
+    ): String {
+        val normalizedPkgName = pkgName.trim()
+        val normalizedClassName = className.trim()
+        if (normalizedPkgName.isBlank() || normalizedClassName.isBlank()) {
+            return normalizedClassName
+        }
+
+        val duplicatePrefix = normalizedPkgName + normalizedPkgName
+        return when {
+            normalizedClassName.startsWith(duplicatePrefix) -> normalizedClassName.removePrefix(normalizedPkgName)
+            normalizedClassName.startsWith(normalizedPkgName) -> normalizedClassName
+            else -> normalizedPkgName + normalizedClassName
+        }
+    }
+
     fun getSignatureHash(pkgInfo: PackageInfo): String? {
         val signatures = pkgInfo.signatures
         return if (signatures != null && signatures.isNotEmpty()) {
@@ -144,7 +201,15 @@ object PackageTools {
         }
     }
 
-    val jarLoaderMap = mutableMapOf<String, URLClassLoader>()
+    val jarLoaderMap = ConcurrentHashMap<String, URLClassLoader>()
+
+    fun clearJarLoader(jarPath: String) {
+        val loader = jarLoaderMap.remove(jarPath)
+        try {
+            loader?.close()
+        } catch (_: Exception) {
+        }
+    }
 
     /**
      * loads the extension main class called [className] from the jar located at [jarPath]
@@ -156,10 +221,11 @@ object PackageTools {
     ): Any {
         try {
             logger.debug { "loading jar with path: $jarPath" }
-            val classLoader = jarLoaderMap[jarPath] ?: URLClassLoader(arrayOf<URL>(Path(jarPath).toUri().toURL()))
+            val classLoader =
+                jarLoaderMap.computeIfAbsent(jarPath) {
+                    ChildFirstURLClassLoader(arrayOf<URL>(Path(jarPath).toUri().toURL()))
+                }
             val classToLoad = Class.forName(className, false, classLoader)
-
-            jarLoaderMap[jarPath] = classLoader
 
             return classToLoad.getDeclaredConstructor().newInstance()
         } catch (e: Exception) {

@@ -5,6 +5,9 @@
 - Improve cookie handling, share cookies between WebView and Extensions
 - Add image conversion on download
 - Add simple login menu
+- Support Bitmap pixel-based access and modification
+- Fix java.lang.VerifyError when installing ProGuard-enabled extensions
+- Fix extension installation retries after install failures
 - Support history in backups
 - Backup Suwayomi-specific data
 - Add OPDS Chapter Filtering/Ordering

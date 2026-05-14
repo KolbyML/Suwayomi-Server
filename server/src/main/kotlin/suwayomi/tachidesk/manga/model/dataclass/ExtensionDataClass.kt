@@ -20,4 +20,6 @@ data class ExtensionDataClass(
     val installed: Boolean,
     val hasUpdate: Boolean,
     val obsolete: Boolean,
+    val className: String? = null,
+    val jarPath: String? = null,
 )

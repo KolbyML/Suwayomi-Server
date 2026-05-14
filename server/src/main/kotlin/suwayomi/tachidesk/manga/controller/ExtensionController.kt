@@ -60,10 +60,12 @@ object ExtensionController {
             },
             behaviorOf = { ctx, pkgName ->
                 ctx.getAttribute(Attribute.TachideskUser).requireUser()
+                logger.info { "runtime install request pkg=$pkgName" }
                 ctx.future {
                     future {
                         Extension.installExtension(pkgName)
                     }.thenApply {
+                        logger.info { "runtime install result pkg=$pkgName status=$it" }
                         ctx.status(it)
                     }
                 }
@@ -91,7 +93,9 @@ object ExtensionController {
             behaviorOf = { ctx ->
                 ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 val uploadedFile = ctx.uploadedFile("file")!!
-                logger.debug { "Uploaded extension file name: " + uploadedFile.filename() }
+                logger.info {
+                    "Uploaded extension file name=${uploadedFile.filename()} contentType=${uploadedFile.contentType()}"
+                }
 
                 ctx.future {
                     future {
@@ -100,6 +104,7 @@ object ExtensionController {
                             uploadedFile.filename(),
                         )
                     }.thenApply {
+                        logger.info { "Extension install upload status=${it}" }
                         ctx.status(it)
                     }
                 }
@@ -123,10 +128,12 @@ object ExtensionController {
             },
             behaviorOf = { ctx, pkgName ->
                 ctx.getAttribute(Attribute.TachideskUser).requireUser()
+                logger.info { "runtime update request pkg=$pkgName" }
                 ctx.future {
                     future {
                         Extension.updateExtension(pkgName)
                     }.thenApply {
+                        logger.info { "runtime update result pkg=$pkgName status=$it" }
                         ctx.status(it)
                     }
                 }
@@ -151,7 +158,9 @@ object ExtensionController {
             },
             behaviorOf = { ctx, pkgName ->
                 ctx.getAttribute(Attribute.TachideskUser).requireUser()
+                logger.info { "runtime uninstall request pkg=$pkgName" }
                 Extension.uninstallExtension(pkgName)
+                logger.info { "runtime uninstall result pkg=$pkgName" }
                 ctx.status(200)
             },
             withResults = {
@@ -176,11 +185,16 @@ object ExtensionController {
                 ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 ctx.future {
                     future { Extension.getExtensionIcon(apkName) }
-                        .thenApply {
-                            ctx.header("content-type", it.second)
+                        .thenApply { iconResponse ->
+                            if (iconResponse == null) {
+                                ctx.status(HttpStatus.NOT_FOUND)
+                                ctx.result("Could not fetch extension icon")
+                                return@thenApply
+                            }
+                            ctx.header("content-type", iconResponse.second)
                             val httpCacheSeconds = 365.days.inWholeSeconds
                             ctx.header("cache-control", "max-age=$httpCacheSeconds, immutable")
-                            ctx.result(it.first)
+                            ctx.result(iconResponse.first)
                         }
                 }
             },

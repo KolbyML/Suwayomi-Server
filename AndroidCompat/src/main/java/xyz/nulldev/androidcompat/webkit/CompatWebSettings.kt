@@ -1,8 +1,9 @@
 package xyz.nulldev.androidcompat.webkit
 
+import android.util.Log
 import android.webkit.WebSettings
 
-class KcefWebSettings : WebSettings() {
+class CompatWebSettings : WebSettings() {
     // Boolean settings
     private var navDumps = false
     private var mediaPlaybackRequiresUserGesture = true
@@ -279,18 +280,21 @@ class KcefWebSettings : WebSettings() {
     override fun getLoadsImagesAutomatically() = loadsImagesAutomatically
 
     override fun setBlockNetworkImage(p0: Boolean) {
+        Log.w(TAG, "setBlockNetworkImage value=$p0")
         blockNetworkImage = p0
     }
 
     override fun getBlockNetworkImage() = blockNetworkImage
 
     override fun setBlockNetworkLoads(p0: Boolean) {
+        Log.w(TAG, "setBlockNetworkLoads value=$p0")
         blockNetworkLoads = p0
     }
 
     override fun getBlockNetworkLoads() = blockNetworkLoads
 
     override fun setJavaScriptEnabled(p0: Boolean) {
+        Log.w(TAG, "setJavaScriptEnabled value=$p0")
         javaScriptEnabled = p0
     }
 
@@ -351,6 +355,7 @@ class KcefWebSettings : WebSettings() {
     override fun getDatabaseEnabled() = true
 
     override fun setDomStorageEnabled(p0: Boolean) {
+        Log.w(TAG, "setDomStorageEnabled value=$p0")
         domStorageEnabled = p0
     }
 
@@ -373,6 +378,7 @@ class KcefWebSettings : WebSettings() {
     override fun getDefaultTextEncodingName() = defaultTextEncodingName ?: ""
 
     override fun setUserAgentString(p0: String?) {
+        Log.w(TAG, "setUserAgentString value=${p0 ?: "<default>"}")
         userAgentString = p0
     }
 
@@ -424,6 +430,8 @@ class KcefWebSettings : WebSettings() {
     override fun getDisabledActionModeMenuItems() = disabledActionModeMenuItems
 
     companion object {
+        private const val TAG = "ManatanCefWebView"
+
         fun defaultUserAgent() = System.getProperty("http.agent")
     }
 }

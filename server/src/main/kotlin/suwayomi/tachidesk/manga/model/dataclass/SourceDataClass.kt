@@ -23,4 +23,5 @@ data class SourceDataClass(
     /** A nicer version of [name] */
     val displayName: String,
     val baseUrl: String?,
+    val extensionPkgName: String? = null,
 )

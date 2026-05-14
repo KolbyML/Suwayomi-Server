@@ -17,9 +17,10 @@ import kotlinx.coroutines.sync.withLock
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.selectAll
+import org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl
+import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import suwayomi.tachidesk.manga.impl.ChapterDownloadHelper
@@ -29,6 +30,7 @@ import suwayomi.tachidesk.manga.model.table.ChapterTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.PageTable
 import suwayomi.tachidesk.manga.model.table.toDataClass
+import suwayomi.tachidesk.server.database.MyBatchInsertStatement
 import kotlin.time.Duration.Companion.minutes
 
 suspend fun getChapterDownloadReady(
@@ -164,11 +166,21 @@ private class ChapterForDownload(
 
                 // Clear existing pages and insert new ones
                 PageTable.deleteWhere { PageTable.chapter eq chapterId }
-                PageTable.batchInsert(pageList) { page ->
-                    this[PageTable.index] = page.index
-                    this[PageTable.url] = page.url
-                    this[PageTable.imageUrl] = page.imageUrl
-                    this[PageTable.chapter] = chapterId
+                if (pageList.isNotEmpty()) {
+                    val insertStatement = MyBatchInsertStatement(PageTable)
+                    pageList.forEach { page ->
+                        insertStatement.addBatch()
+                        insertStatement[PageTable.index] = page.index
+                        insertStatement[PageTable.url] = page.url
+                        insertStatement[PageTable.imageUrl] = page.imageUrl
+                        insertStatement[PageTable.chapter] = chapterId
+                    }
+
+                    val sql = insertStatement.prepareSQL(this, prepared = false)
+                    val connection = (TransactionManager.current().connection as JdbcConnectionImpl).connection
+                    connection.createStatement().use { statement ->
+                        statement.execute(sql)
+                    }
                 }
 
                 // Update page count

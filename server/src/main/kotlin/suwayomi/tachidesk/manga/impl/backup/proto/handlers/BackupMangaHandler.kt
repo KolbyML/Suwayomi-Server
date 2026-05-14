@@ -11,11 +11,13 @@ import eu.kanade.tachiyomi.source.model.UpdateStrategy
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.insertAndGetId
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.BatchUpdateStatement
+import org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl
+import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import suwayomi.tachidesk.manga.impl.CategoryManga
@@ -37,6 +39,7 @@ import suwayomi.tachidesk.manga.model.table.ChapterTable
 import suwayomi.tachidesk.manga.model.table.MangaStatus
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.toDataClass
+import suwayomi.tachidesk.server.database.MyBatchInsertStatement
 import suwayomi.tachidesk.server.database.dbTransaction
 import java.util.Date
 import kotlin.math.max
@@ -312,32 +315,46 @@ object BackupMangaHandler {
 
         val insertedChapterIds =
             if (flags.includeChapters) {
-                ChapterTable
-                    .batchInsert(chaptersToInsert) { chapter ->
-                        this[ChapterTable.url] = chapter.url
-                        this[ChapterTable.name] = chapter.name
-                        if (chapter.dateUpload == 0L) {
-                            this[ChapterTable.date_upload] = chapter.dateFetch
-                        } else {
-                            this[ChapterTable.date_upload] = chapter.dateUpload
-                        }
-                        this[ChapterTable.chapter_number] = chapter.chapterNumber
-                        this[ChapterTable.scanlator] = chapter.scanlator
+                val insertStatement = MyBatchInsertStatement(ChapterTable)
+                chaptersToInsert.forEach { chapter ->
+                    insertStatement.addBatch()
+                    insertStatement[ChapterTable.url] = chapter.url
+                    insertStatement[ChapterTable.name] = chapter.name
+                    if (chapter.dateUpload == 0L) {
+                        insertStatement[ChapterTable.date_upload] = chapter.dateFetch
+                    } else {
+                        insertStatement[ChapterTable.date_upload] = chapter.dateUpload
+                    }
+                    insertStatement[ChapterTable.chapter_number] = chapter.chapterNumber
+                    insertStatement[ChapterTable.scanlator] = chapter.scanlator
+                    insertStatement[ChapterTable.sourceOrder] = chaptersToInsert.size - chapter.sourceOrder
+                    insertStatement[ChapterTable.manga] = mangaId
+                    insertStatement[ChapterTable.isRead] = chapter.read
+                    insertStatement[ChapterTable.lastPageRead] = chapter.lastPageRead.coerceAtLeast(0)
+                    insertStatement[ChapterTable.isBookmarked] = chapter.bookmark
+                    insertStatement[ChapterTable.fetchedAt] = chapter.dateFetch.milliseconds.inWholeSeconds
 
-                        this[ChapterTable.sourceOrder] = chaptersToInsert.size - chapter.sourceOrder
-                        this[ChapterTable.manga] = mangaId
+                    if (flags.includeHistory) {
+                        insertStatement[ChapterTable.lastReadAt] =
+                            historyByChapter[chapter.url]?.maxOrNull()?.milliseconds?.inWholeSeconds ?: 0
+                    }
+                }
 
-                        this[ChapterTable.isRead] = chapter.read
-                        this[ChapterTable.lastPageRead] = chapter.lastPageRead.coerceAtLeast(0)
-                        this[ChapterTable.isBookmarked] = chapter.bookmark
+                if (chaptersToInsert.isNotEmpty()) {
+                    val sql = insertStatement.prepareSQL(this, prepared = false)
+                    val connection = (TransactionManager.current().connection as JdbcConnectionImpl).connection
+                    connection.createStatement().use { statement ->
+                        statement.execute(sql)
+                    }
+                }
 
-                        this[ChapterTable.fetchedAt] = chapter.dateFetch.milliseconds.inWholeSeconds
+                val insertedRowsByUrl =
+                    ChapterTable
+                        .selectAll()
+                        .where { (ChapterTable.manga eq mangaId) and (ChapterTable.url inList chaptersToInsert.map { it.url }) }
+                        .associateBy { it[ChapterTable.url] }
 
-                        if (flags.includeHistory) {
-                            this[ChapterTable.lastReadAt] =
-                                historyByChapter[chapter.url]?.maxOrNull()?.milliseconds?.inWholeSeconds ?: 0
-                        }
-                    }.map { it[ChapterTable.id].value }
+                chaptersToInsert.mapNotNull { insertedRowsByUrl[it.url]?.get(ChapterTable.id)?.value }
             } else {
                 emptyList()
             }

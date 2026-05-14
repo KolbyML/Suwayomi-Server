@@ -52,7 +52,8 @@ public class Preference {
     }
 
     public void setOnPreferenceClickListener(OnPreferenceClickListener onPreferenceClickListener) {
-        throw new RuntimeException("Stub!");
+        // Not used by Tachidesk preference serialization flow.
+        // Keep as a no-op so extensions that register click listeners do not crash.
     }
 
     public CharSequence getTitle() {

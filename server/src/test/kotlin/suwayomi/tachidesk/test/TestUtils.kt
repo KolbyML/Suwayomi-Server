@@ -11,12 +11,18 @@ import ch.qos.logback.classic.Level
 import eu.kanade.tachiyomi.source.model.SManga
 import io.github.oshai.kotlinlogging.DelegatingKLogger
 import io.github.oshai.kotlinlogging.KotlinLogging
+import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.dao.id.IdTable
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.deleteAll
+import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.insertAndGetId
+import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.Logger
+import suwayomi.tachidesk.manga.impl.Category
+import suwayomi.tachidesk.manga.model.table.CategoryTable
 import suwayomi.tachidesk.manga.model.table.ChapterTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 
@@ -30,7 +36,9 @@ fun setLoggingEnabled(enabled: Boolean = true) {
         }
 }
 
-const val BASE_PATH = "build/tmp/TestDesk"
+val BASE_PATH =
+    System.getProperty("suwayomi.test.basePath")
+        ?: "build/tmp/TestDesk-${System.currentTimeMillis()}"
 
 fun createLibraryManga(_title: String): Int =
     transaction {
@@ -56,11 +64,12 @@ fun createChapters(
     amount: Int,
     read: Boolean,
 ) {
-    val list = listOf((0 until amount)).flatten().map { 1 }
     transaction {
+        val startIndex = ChapterTable.selectAll().where { ChapterTable.manga eq mangaId }.count().toInt()
+        val list = (startIndex until (startIndex + amount)).toList()
         ChapterTable
             .batchInsert(list) {
-                this[ChapterTable.url] = "$it"
+                this[ChapterTable.url] = "$mangaId-$it"
                 this[ChapterTable.name] = "$it"
                 this[ChapterTable.sourceOrder] = it
                 this[ChapterTable.isRead] = read
@@ -73,6 +82,14 @@ fun clearTables(vararg tables: IdTable<*>) {
     transaction {
         for (table in tables) {
             table.deleteAll()
+        }
+        if (tables.any { it == CategoryTable }) {
+            CategoryTable.insert {
+                it[id] = EntityID(Category.DEFAULT_CATEGORY_ID, CategoryTable)
+                it[name] = Category.DEFAULT_CATEGORY_NAME
+                it[order] = 0
+                it[isDefault] = true
+            }
         }
     }
 }

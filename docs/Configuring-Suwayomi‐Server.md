@@ -63,6 +63,13 @@ server.webUISubpath = ""
 - `server.webUIUpdateCheckInterval` the interval time in hours at which to check for updates. Use `0` to disable update checking.
 - `server.webUISubpath` controls on which sub-path the UI is served; by default, it will be accessible on `/` (i.e. directly), with this setting it can also be set to appear at e.g. `/suwayomi`
 
+### Network
+```
+server.enableCookieApi = true
+```
+- `server.enableCookieApi = true` enables the `/api/v1/cookie` endpoint for syncing cookies from external webviews. This is useful for sources that require login via webview, as it allows the webview to share cookies with Suwayomi-Server. Or bypassing Cloudflare challenges that require a webview to solve.
+
+
 ### Downloader
 ```
 server.downloadAsCbz = true
@@ -191,8 +198,10 @@ server.autoBackupIncludeServerSettings = true
 ### Local Source
 ```
 server.localSourcePath = ""
+server.localAnimeSourcePath = ""
 ```
 - `server.localSourcePath = ""` the path from where local manga are loaded, if the value is empty, the default directory `local` inside [the data directory](https://github.com/Suwayomi/Suwayomi-Server/wiki/The-Data-Directory) will be used. If you are on Windows the slashes `\` needs to be doubled(`\\`) or replaced with `/`
+- `server.localAnimeSourcePath = ""` the path from where local anime are loaded, if the value is empty, the default directory `localanime` inside [the data directory](https://github.com/Suwayomi/Suwayomi-Server/wiki/The-Data-Directory) will be used. If you are on Windows the slashes `\` needs to be doubled(`\\`) or replaced with `/`
 
 ### Cloudflare bypass
 ```
@@ -256,21 +265,13 @@ server.koreaderSyncStrategyBackward = DISABLED # PROMPT, KEEP_LOCAL, KEEP_REMOTE
 
 ### Database
 ```
-server.databaseType = H2 # H2, POSTGRESQL
-server.databaseUrl = "postgresql://localhost:5432/suwayomi"
-server.databaseUsername = ""
-server.databasePassword = ""
-server.useHikariConnectionPool = true
+The server uses a local SQLite database stored in the data directory.
+By default this is created at `<dataRoot>/database.sqlite`.
 ```
-- `server.databaseType` chooses which type of database to use. [H2](https://en.wikipedia.org/wiki/H2_Database_Engine) is the default; it is a simple file-based database for Java applications. Since it is only based on files without a server process, file corruption can be common when the server is not shut down properly. [PostgreSQL](https://en.wikipedia.org/wiki/PostgreSQL) is a popular cross-platform, stable database. To use PostgreSQL, you need to run an instance yourself.
-- `server.databaseUrl` the URL where to find the PostgreSQL server, including the database name.
-- `server.databaseUsername` the username with which to authenticate at the PostgreSQL instance.
-- `server.databasePassword` the username with which to authenticate at the PostgreSQL instance.
-- `server.useHikariConnectionPool` use Hikari Connection Pool to connect to the database.
-
-**Note:** The example [docker-compose.yml file](https://github.com/Suwayomi/Suwayomi-Server-docker/blob/main/docker-compose.yml) contains everything you need to get started with Suwayomi+PostgreSQL. Please be aware that PostgreSQL support is currently still in beta.
-
-**Note:** These settings are excluded from backups, so a backup can be used to easily switch database installations by setting up the connection first, then restoring the backup.
+- Suwayomi-Server now uses SQLite exclusively. H2 and PostgreSQL configuration options are no longer supported.
+- The persistent database is stored at `<dataRoot>/database.sqlite`.
+- Runtime-only bootstraps use a separate SQLite database at `<dataRoot>/runtime.sqlite`.
+- Backups still contain application data, but they do not replace the database file directly.
 
 ## Overriding configuration options with command-line arguments
 You can override the above configuration options with command-line arguments. 
@@ -295,4 +296,3 @@ For example:
 ```
 java -Dsuwayomi.tachidesk.config.server.rootDir="/path/to/data/directory" -jar Suwayomi-Server-v0.X.Y-rXXXX.jar
 ```
-

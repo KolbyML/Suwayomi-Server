@@ -79,12 +79,27 @@ class JavaSharedPreferences(
     override fun getString(
         key: String,
         defValue: String?,
-    ): String? =
-        if (defValue != null) {
-            preferences.getString(key, defValue)
-        } else {
-            preferences.getStringOrNull(key)
+    ): String? {
+        val value =
+            if (defValue != null) {
+                preferences.getString(key, defValue)
+            } else {
+                preferences.getStringOrNull(key)
+            }
+
+        return normalizeStringPreference(key, value)
+    }
+
+    private fun normalizeStringPreference(
+        key: String,
+        value: String?,
+    ): String? {
+        if (key == "host_url") {
+            return value?.trimEnd('/')
         }
+
+        return value
+    }
 
     override fun getStringSet(
         key: String,

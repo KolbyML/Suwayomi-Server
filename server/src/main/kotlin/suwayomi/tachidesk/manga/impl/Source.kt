@@ -37,7 +37,7 @@ object Source {
 
     fun getSourceList(): List<SourceDataClass> {
         return transaction {
-            SourceTable.selectAll().mapNotNull {
+            val sources = SourceTable.selectAll().mapNotNull {
                 val catalogueSource = getCatalogueSourceOrNull(it[SourceTable.id].value) ?: return@mapNotNull null
                 val sourceExtension = ExtensionTable.selectAll().where { ExtensionTable.id eq it[SourceTable.extension] }.first()
 
@@ -51,8 +51,11 @@ object Source {
                     isNsfw = it[SourceTable.isNsfw],
                     displayName = catalogueSource.toString(),
                     baseUrl = runCatching { (catalogueSource as? HttpSource)?.baseUrl }.getOrNull(),
+                    extensionPkgName = sourceExtension[ExtensionTable.pkgName],
                 )
             }
+            logger.info { "source list count=${sources.size} sample=${sources.take(5).map { it.id + ":" + it.extensionPkgName }}" }
+            sources
         }
     }
 
@@ -75,6 +78,7 @@ object Source {
                 isNsfw = source[SourceTable.isNsfw],
                 displayName = catalogueSource.toString(),
                 baseUrl = runCatching { (catalogueSource as? HttpSource)?.baseUrl }.getOrNull(),
+                extensionPkgName = extension[ExtensionTable.pkgName],
             )
         }
     }
@@ -129,6 +133,17 @@ object Source {
 
     private val jsonMapper: JsonMapper by injectLazy()
 
+    private fun normalizePreferenceValue(
+        pref: Preference,
+        value: Any,
+    ): Any {
+        if (value is String && pref.key == "host_url") {
+            return value.trimEnd('/')
+        }
+
+        return value
+    }
+
     fun setSourcePreference(
         sourceId: Long,
         position: Int,
@@ -149,10 +164,14 @@ object Source {
             return
         }
 
-        val newValue = getValue(pref)
+        val newValue = normalizePreferenceValue(pref, getValue(pref))
+
+        val accepted = pref.callChangeListener(newValue)
+        if (!accepted) {
+            return
+        }
 
         pref.saveNewValue(newValue)
-        pref.callChangeListener(newValue)
 
         // must reload the source because a preference was changed
         unregisterCatalogueSource(sourceId)

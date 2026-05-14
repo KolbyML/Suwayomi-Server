@@ -9,6 +9,7 @@ package suwayomi.tachidesk.server
 
 import gg.jte.ContentType
 import gg.jte.TemplateEngine
+import eu.kanade.tachiyomi.network.HttpException
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.javalin.Javalin
 import io.javalin.apibuilder.ApiBuilder.after
@@ -26,13 +27,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.future.future
+import org.eclipse.jetty.server.Connector
 import org.eclipse.jetty.server.ServerConnector
+import org.eclipse.jetty.util.thread.QueuedThreadPool
 import suwayomi.tachidesk.global.GlobalAPI
 import suwayomi.tachidesk.graphql.GraphQL
 import suwayomi.tachidesk.graphql.types.AuthMode
 import suwayomi.tachidesk.i18n.LocalizationHelper
 import suwayomi.tachidesk.manga.MangaAPI
 import suwayomi.tachidesk.opds.OpdsAPI
+import suwayomi.tachidesk.server.plugin.ServerPluginRegistry
 import suwayomi.tachidesk.server.user.ForbiddenException
 import suwayomi.tachidesk.server.user.UnauthorizedException
 import suwayomi.tachidesk.server.user.UserType
@@ -53,14 +57,44 @@ object JavalinSetup {
     private val logger = KotlinLogging.logger {}
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val appLifecycleLock = Any()
+
+    @Volatile
+    private var appInstance: Javalin? = null
 
     fun <T> future(block: suspend CoroutineScope.() -> T): CompletableFuture<T> = scope.future(block = block)
 
+    fun restartServer(reason: String) {
+        synchronized(appLifecycleLock) {
+            logger.warn { "Restarting runtime server (reason=$reason)" }
+            runCatching {
+                appInstance?.stop()
+            }.onFailure {
+                logger.warn(it) { "Failed to stop previous runtime server before restart" }
+            }
+            appInstance = null
+        }
+
+        runCatching {
+            javalinSetup()
+            logger.info { "Runtime server restart completed" }
+        }.onFailure {
+            logger.error(it) { "Runtime server restart failed" }
+        }
+    }
+
     fun javalinSetup() {
+        synchronized(appLifecycleLock) {
+            if (appInstance != null) {
+                logger.debug { "Runtime server is already initialized; skipping setup" }
+                return
+            }
+
         val app =
             Javalin.create { config ->
                 val templateEngine = TemplateEngine.createPrecompiled(ContentType.Html)
                 config.fileRenderer(JavalinJte(templateEngine))
+                config.jetty.threadPool = QueuedThreadPool(100, 8, 60_000).apply { name = "JettyServerThreadPool" }
 
                 WebInterfaceManager.setup(config)
 
@@ -104,19 +138,38 @@ object JavalinSetup {
                     }
                 }
 
+                val runtimeOnly = RuntimeMode.isRuntimeOnly()
+
                 config.router.apiBuilder {
                     path(ServerSubpath.maybeAddAsPrefix("api/")) {
                         path("v1/") {
-                            GlobalAPI.defineEndpoints()
-                            MangaAPI.defineEndpoints()
+                            if (!runtimeOnly) {
+                                GlobalAPI.defineEndpoints()
+                                MangaAPI.defineEndpoints()
+                                ServerPluginRegistry.defineApiV1Routes()
+                            }
                         }
 
-                        OpdsAPI.defineEndpoints()
-                        GraphQL.defineEndpoints()
+                        if (!runtimeOnly) {
+                            OpdsAPI.defineEndpoints()
+                            GraphQL.defineEndpoints()
+                        }
 
                         after { ctx ->
                             // If not matched, the request was for an invalid endpoint
                             // Return a 404 instead of redirecting to the UI for usability
+                            if (ctx.endpointHandlerPath() == "*") {
+                                throw NotFoundResponse()
+                            }
+                        }
+                    }
+
+                    path(ServerSubpath.maybeAddAsPrefix("runtime/")) {
+                        path("v1/") {
+                            ServerPluginRegistry.defineRuntimeV1Routes()
+                        }
+
+                        after { ctx ->
                             if (ctx.endpointHandlerPath() == "*") {
                                 throw NotFoundResponse()
                             }
@@ -182,7 +235,9 @@ object JavalinSetup {
                     !ctx.path().substring(1).contains('/') &&
                     listOf(".png", ".jpg", ".ico").any { ctx.path().endsWith(it) }
             val isPreFlight = ctx.method() == HandlerType.OPTIONS
-            val isApi = ctx.path().startsWith(ServerSubpath.maybeAddAsPrefix("/api/"))
+            val isApi =
+                ctx.path().startsWith(ServerSubpath.maybeAddAsPrefix("/api/")) ||
+                    ctx.path().startsWith(ServerSubpath.maybeAddAsPrefix("/runtime/"))
 
             val requiresAuthentication = !isPreFlight && !isPageIcon && !isWebManifest
             if (!requiresAuthentication) {
@@ -248,6 +303,11 @@ object JavalinSetup {
             logger.error(e) { "NoSuchElementException while handling the request" }
             ctx.status(404)
         }
+        app.exception(HttpException::class.java) { e, ctx ->
+            logger.warn(e) { "HttpException while handling the request" }
+            ctx.status(e.code)
+            ctx.result(e.message ?: "HTTP error ${e.code}")
+        }
         app.exception(IOException::class.java) { e, ctx ->
             logger.error(e) { "IOException while handling the request" }
             ctx.status(500)
@@ -273,6 +333,28 @@ object JavalinSetup {
         }
 
         app.start()
+        appInstance = app
+        }
+    }
+
+    private fun getConnector(): Connector? = appInstance?.jettyServer()?.server()?.connectors?.firstOrNull()
+
+    fun javalinStartSocket() {
+        synchronized(appLifecycleLock) {
+            val connector = getConnector() ?: return
+            if (!connector.isStarted) {
+                connector.start()
+            }
+        }
+    }
+
+    fun javalinStopSocket() {
+        synchronized(appLifecycleLock) {
+            val connector = getConnector() ?: return
+            if (connector.isStarted) {
+                connector.stop()
+            }
+        }
     }
 
     // private fun getOpenApiOptions(): OpenApiOptions {

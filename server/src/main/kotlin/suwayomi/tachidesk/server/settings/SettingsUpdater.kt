@@ -59,4 +59,12 @@ object SettingsUpdater {
                 }
             }
     }
+
+    fun updateFromMap(settings: Map<String, Any?>) {
+        settings.forEach { (name, value) ->
+            if (value != null) {
+                updateSetting(name, value)
+            }
+        }
+    }
 }

@@ -3,11 +3,9 @@
 package suwayomi.tachidesk.server.database.migration
 
 import de.neonew.exposed.migrations.helpers.SQLMigration
-import suwayomi.tachidesk.graphql.types.DatabaseType
 import suwayomi.tachidesk.server.database.migration.helpers.MAYBE_TYPE_PREFIX
 import suwayomi.tachidesk.server.database.migration.helpers.UNLIMITED_TEXT
 import suwayomi.tachidesk.server.database.migration.helpers.toSqlName
-import suwayomi.tachidesk.server.serverConfig
 
 /*
  * Copyright (C) Contributors to the Suwayomi project
@@ -35,31 +33,17 @@ class M0053_TrackersFixIds : SQLMigration() {
         """.trimIndent()
     }
 
-    fun h2RightMost(
+    fun sqliteRightMost(
         field: String,
         sep: Char,
-    ): String = "SUBSTRING($field, LOCATE('$sep', $field, -1) + 1)"
+    ): String = field
 
-    fun postgresRightMost(
-        field: String,
-        sep: Char,
-    ): String = "SUBSTRING(SUBSTRING($field FROM '$sep[^$sep]*$') FROM 2)"
-
-    fun h2ToNumber(expr: String): String = expr
-
-    fun postgresToNumber(expr: String): String = "TO_NUMBER($expr, '0000000000')"
+    fun sqliteToNumber(expr: String): String = "CAST($expr AS INTEGER)"
 
     fun rightMost(
         field: String,
         sep: Char,
-    ) = when (serverConfig.databaseType.value) {
-        DatabaseType.H2 -> h2RightMost(field, sep)
-        DatabaseType.POSTGRESQL -> postgresRightMost(field, sep)
-    }
+    ) = sqliteRightMost(field, sep)
 
-    fun toNumber(expr: String) =
-        when (serverConfig.databaseType.value) {
-            DatabaseType.H2 -> h2ToNumber(expr)
-            DatabaseType.POSTGRESQL -> postgresToNumber(expr)
-        }
+    fun toNumber(expr: String) = sqliteToNumber(expr)
 }

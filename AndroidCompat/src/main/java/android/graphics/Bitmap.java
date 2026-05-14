@@ -6,6 +6,7 @@ import android.annotation.Nullable;
 import android.util.Log;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Iterator;
@@ -15,20 +16,101 @@ import javax.imageio.ImageWriteParam;
 import javax.imageio.ImageWriter;
 import javax.imageio.stream.ImageOutputStream;
 
-
 public final class Bitmap {
-    private final int width;
-    private final int height;
-    private final BufferedImage image;
+    private static final String TAG = "Bitmap";
 
-    public Bitmap(BufferedImage image) {
+    private static final boolean ENABLE_NATIVE_IMAGE =
+            Boolean.parseBoolean(System.getProperty("suwayomi.native.image",
+                    System.getenv().getOrDefault("SUWAYOMI_NATIVE_IMAGE", "false")));
+
+    private static volatile boolean nativeBridgeAvailable = true;
+
+    private int width;
+    private int height;
+    private BufferedImage image;
+
+    private NativeRef nativeImageRef;
+    private NativeRef nativeCanvasRef;
+
+    private Bitmap() {}
+
+    private Bitmap(BufferedImage image) {
         this.image = image;
         this.width = image.getWidth();
         this.height = image.getHeight();
     }
 
-    public BufferedImage getImage() {
-        return image;
+    static boolean shouldUseNativeImage() {
+        return ENABLE_NATIVE_IMAGE && nativeBridgeAvailable;
+    }
+
+    private static void disableNativeBridge(UnsatisfiedLinkError error) {
+        nativeBridgeAvailable = false;
+        Log.w(TAG, "Native image bridge unavailable, falling back to Java ImageIO", error);
+    }
+
+    static Bitmap createBitmap(byte[] bytes) {
+        if (shouldUseNativeImage()) {
+            Bitmap bitmap = new Bitmap();
+            try {
+                long[] result = bitmap.createNativeImage(bytes);
+                bitmap.nativeImageRef = new NativeRef(result[0]);
+                bitmap.width = (int) result[1];
+                bitmap.height = (int) result[2];
+                return bitmap;
+            } catch (UnsatisfiedLinkError error) {
+                disableNativeBridge(error);
+            }
+        }
+
+        return new Bitmap(decodeBufferedImage(bytes));
+    }
+
+    BufferedImage getImage() {
+        return requireImage();
+    }
+
+    BufferedImage ensureMutableImageBacking() {
+        BufferedImage current = requireImage();
+        if (nativeCanvasRef == null && nativeImageRef == null) {
+            return current;
+        }
+
+        int type = current.getType();
+        if (type == BufferedImage.TYPE_CUSTOM || type == 0) {
+            type = BufferedImage.TYPE_INT_ARGB;
+        }
+
+        BufferedImage mutable = new BufferedImage(current.getWidth(), current.getHeight(), type);
+        Graphics2D graphics = mutable.createGraphics();
+        graphics.drawImage(current, 0, 0, null);
+        graphics.dispose();
+
+        image = mutable;
+        releaseNativeObject();
+        return mutable;
+    }
+
+    BufferedImage requireImage() {
+        if (image != null) {
+            return image;
+        }
+
+        if (nativeCanvasRef != null) {
+            image = decodeBufferedImage(exportNativeCanvas(nativeCanvasRef.address()));
+            width = image.getWidth();
+            height = image.getHeight();
+            return image;
+        }
+
+        if (nativeImageRef != null) {
+            image = decodeBufferedImage(exportNativeImage(nativeImageRef.address()));
+            width = image.getWidth();
+            height = image.getHeight();
+            return image;
+        }
+
+        throw new IllegalStateException("Bitmap has no backing image");
     }
 
     public int getHeight() {
@@ -40,17 +122,17 @@ public final class Bitmap {
     }
 
     public enum CompressFormat {
-        JPEG          (0),
-        PNG           (1),
-        WEBP          (2),
-        WEBP_LOSSY    (3),
-        WEBP_LOSSLESS (4);
+        JPEG(0),
+        PNG(1),
+        WEBP(2),
+        WEBP_LOSSY(3),
+        WEBP_LOSSLESS(4);
+
+        final int nativeInt;
 
         CompressFormat(int nativeInt) {
             this.nativeInt = nativeInt;
         }
-
-        final int nativeInt;
     }
 
     public enum Config {
@@ -115,7 +197,7 @@ public final class Bitmap {
             case _TYPE_USHORT_555_RGB:
             case _TYPE_USHORT_565_RGB:
             case _TYPE_USHORT_GRAY:
-                return config.ordinal();
+                return config.nativeInt;
             default:
                 throw new UnsupportedOperationException("Bitmap.Config(" + config + ") not supported");
         }
@@ -152,17 +234,23 @@ public final class Bitmap {
             case BufferedImage.TYPE_USHORT_GRAY:
                 return Config._TYPE_USHORT_GRAY;
             default:
-                Log.w("Bitmap", "Encountered unsupported image type " + type);
+                Log.w(TAG, "Encountered unsupported image type " + type);
                 return null;
         }
     }
 
-    /**
-     * Common code for checking that x and y are >= 0
-     *
-     * @param x x coordinate to ensure is >= 0
-     * @param y y coordinate to ensure is >= 0
-     */
+    private static BufferedImage decodeBufferedImage(byte[] bytes) {
+        try {
+            BufferedImage decoded = ImageIO.read(new ByteArrayInputStream(bytes));
+            if (decoded == null) {
+                throw new IllegalArgumentException("Unable to decode image");
+            }
+            return decoded;
+        } catch (IOException exception) {
+            throw new RuntimeException(exception);
+        }
+    }
+
     private static void checkXYSign(int x, int y) {
         if (x < 0) {
             throw new IllegalArgumentException("x must be >= 0");
@@ -172,12 +260,6 @@ public final class Bitmap {
         }
     }
 
-    /**
-     * Common code for checking that width and height are > 0
-     *
-     * @param width  width to ensure is > 0
-     * @param height height to ensure is > 0
-     */
     private static void checkWidthHeight(int width, int height) {
         if (width <= 0) {
             throw new IllegalArgumentException("width must be > 0");
@@ -188,8 +270,20 @@ public final class Bitmap {
     }
 
     public static Bitmap createBitmap(int width, int height, Config config) {
-        BufferedImage image = new BufferedImage(width, height, configToBufferedImageType(config));
-        return new Bitmap(image);
+        if (shouldUseNativeImage()) {
+            Bitmap bitmap = new Bitmap();
+            try {
+                bitmap.nativeCanvasRef = new NativeRef(bitmap.createNativeCanvas(width, height));
+                bitmap.width = width;
+                bitmap.height = height;
+                return bitmap;
+            } catch (UnsatisfiedLinkError error) {
+                disableNativeBridge(error);
+            }
+        }
+
+        BufferedImage bufferedImage = new BufferedImage(width, height, configToBufferedImageType(config));
+        return new Bitmap(bufferedImage);
     }
 
     public static Bitmap createBitmap(@NonNull Bitmap source, int x, int y, int width, int height) {
@@ -202,31 +296,86 @@ public final class Bitmap {
             throw new IllegalArgumentException("y + height must be <= bitmap.height()");
         }
 
-        // Android will make a copy when creating a sub image,
-        // so we do the same here
-        BufferedImage subImage = source.image.getSubimage(x, y, width, height);
-        BufferedImage newImage = new BufferedImage(subImage.getWidth(), subImage.getHeight(), subImage.getType());
-        newImage.setData(subImage.getData());
+        BufferedImage sourceImage = source.requireImage();
+        BufferedImage subImage = sourceImage.getSubimage(x, y, width, height);
+        int type = subImage.getType();
+        if (type == BufferedImage.TYPE_CUSTOM || type == 0) {
+            type = BufferedImage.TYPE_INT_ARGB;
+        }
+        BufferedImage copy = new BufferedImage(subImage.getWidth(), subImage.getHeight(), type);
+        Graphics2D graphics = copy.createGraphics();
+        graphics.drawImage(subImage, 0, 0, null);
+        graphics.dispose();
+        return new Bitmap(copy);
+    }
 
-        return new Bitmap(newImage);
+    void drawBitmap(Bitmap sourceBitmap, Rect src, Rect dst, Paint paint) {
+        if (shouldUseNativeImage() &&
+                nativeCanvasRef != null &&
+                sourceBitmap.nativeImageRef != null) {
+            try {
+                drawBitmap(
+                        sourceBitmap.nativeImageRef.address(),
+                        nativeCanvasRef.address(),
+                        new int[] { src.left, src.top, src.right, src.bottom },
+                        new int[] { dst.left, dst.top, dst.right, dst.bottom }
+                );
+                return;
+            } catch (UnsatisfiedLinkError error) {
+                disableNativeBridge(error);
+            }
+        }
+
+        BufferedImage targetImage = ensureMutableImageBacking();
+        BufferedImage sourceImage = sourceBitmap.requireImage();
+        BufferedImage cropped = sourceImage.getSubimage(src.left, src.top, src.getWidth(), src.getHeight());
+        Graphics2D graphics = targetImage.createGraphics();
+        graphics.drawImage(cropped, dst.left, dst.top, dst.getWidth(), dst.getHeight(), null);
+        graphics.dispose();
     }
 
     public boolean compress(CompressFormat format, int quality, OutputStream stream) {
         if (stream == null) {
             throw new NullPointerException();
         }
-
         if (quality < 0 || quality > 100) {
             throw new IllegalArgumentException("quality must be 0..100");
         }
-        float qualityFloat = ((float) quality) / 100;
 
+        if (shouldUseNativeImage()) {
+            try {
+                if (nativeCanvasRef != null) {
+                    stream.write(getImage(nativeCanvasRef.address(), format.nativeInt, sanitizeQuality(quality)));
+                    return true;
+                }
+                if (nativeImageRef != null) {
+                    stream.write(compressImage(nativeImageRef.address(), format.nativeInt, sanitizeQuality(quality)));
+                    return true;
+                }
+            } catch (UnsatisfiedLinkError error) {
+                disableNativeBridge(error);
+            } catch (IOException exception) {
+                throw new RuntimeException(exception);
+            }
+        }
+
+        return compressWithImageIo(format, quality, stream);
+    }
+
+    private int sanitizeQuality(int quality) {
+        if (quality == 0 || quality > 90) {
+            return 90;
+        }
+        return quality;
+    }
+
+    private boolean compressWithImageIo(CompressFormat format, int quality, OutputStream stream) {
         String formatString;
-        if (format == Bitmap.CompressFormat.PNG) {
+        if (format == CompressFormat.PNG) {
             formatString = "png";
-        } else if (format == Bitmap.CompressFormat.JPEG) {
+        } else if (format == CompressFormat.JPEG) {
             formatString = "jpg";
-        } else if (format == Bitmap.CompressFormat.WEBP || format == Bitmap.CompressFormat.WEBP_LOSSY) {
+        } else if (format == CompressFormat.WEBP || format == CompressFormat.WEBP_LOSSY) {
             formatString = "webp";
         } else {
             throw new IllegalArgumentException("unsupported compression format! " + format);
@@ -238,56 +387,43 @@ public final class Bitmap {
         }
         ImageWriter writer = writers.next();
 
-        ImageOutputStream ios;
         try {
-            ios = ImageIO.createImageOutputStream(stream);
-        } catch (IOException ex) {
-            throw new RuntimeException(ex);
-        }
-        writer.setOutput(ios);
+            ImageOutputStream imageOutputStream = ImageIO.createImageOutputStream(stream);
+            writer.setOutput(imageOutputStream);
 
-        BufferedImage img = image;
+            BufferedImage targetImage = requireImage();
+            BufferedImage outputImage = targetImage;
+            ImageWriteParam params = writer.getDefaultWriteParam();
+            if ("jpg".equals(formatString)) {
+                params.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+                params.setCompressionQuality(((float) quality) / 100f);
 
-        ImageWriteParam param = writer.getDefaultWriteParam();
-        if ("jpg".equals(formatString)) {
-            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            param.setCompressionQuality(qualityFloat);
+                outputImage = new BufferedImage(targetImage.getWidth(), targetImage.getHeight(), BufferedImage.TYPE_INT_RGB);
+                Graphics2D graphics = outputImage.createGraphics();
+                graphics.drawImage(targetImage, 0, 0, null);
+                graphics.dispose();
+            }
 
-            img = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
-            img.getGraphics().drawImage(image, 0, 0, null);
-        }
-
-        try {
-            writer.write(null, new IIOImage(img, null, null), param);
-            ios.close();
+            writer.write(null, new IIOImage(outputImage, null, null), params);
+            imageOutputStream.close();
             writer.dispose();
-        } catch (IOException ex) {
-            throw new RuntimeException(ex);
+        } catch (IOException exception) {
+            throw new RuntimeException(exception);
         }
 
         return true;
     }
 
     public Bitmap copy(Config config, boolean isMutable) {
-        Bitmap ret = createBitmap(width, height, config);
-        ret.image.getGraphics().drawImage(image, 0, 0, null);
-        return ret;
+        BufferedImage source = requireImage();
+        BufferedImage target = new BufferedImage(width, height, configToBufferedImageType(config));
+        Graphics2D graphics = target.createGraphics();
+        graphics.drawImage(source, 0, 0, null);
+        graphics.dispose();
+        return new Bitmap(target);
     }
 
-    /**
-     * Shared code to check for illegal arguments passed to getPixels()
-     * or setPixels()
-     *
-     * @param x      left edge of the area of pixels to access
-     * @param y      top edge of the area of pixels to access
-     * @param width  width of the area of pixels to access
-     * @param height height of the area of pixels to access
-     * @param offset offset into pixels[] array
-     * @param stride number of elements in pixels[] between each logical row
-     * @param pixels array to hold the area of pixels being accessed
-     */
-    private void checkPixelsAccess(int x, int y, int width, int height,
-                                   int offset, int stride, int[] pixels) {
+    private void checkPixelsAccess(int x, int y, int width, int height, int offset, int stride, int[] pixels) {
         checkXYSign(x, y);
         if (width < 0) {
             throw new IllegalArgumentException("width must be >= 0");
@@ -296,32 +432,21 @@ public final class Bitmap {
             throw new IllegalArgumentException("height must be >= 0");
         }
         if (x + width > getWidth()) {
-            throw new IllegalArgumentException(
-                    "x + width must be <= bitmap.width()");
+            throw new IllegalArgumentException("x + width must be <= bitmap.width()");
         }
         if (y + height > getHeight()) {
-            throw new IllegalArgumentException(
-                    "y + height must be <= bitmap.height()");
+            throw new IllegalArgumentException("y + height must be <= bitmap.height()");
         }
         if (Math.abs(stride) < width) {
             throw new IllegalArgumentException("abs(stride) must be >= width");
         }
         int lastScanline = offset + (height - 1) * stride;
         int length = pixels.length;
-        if (offset < 0 || (offset + width > length)
-                || lastScanline < 0
-                || (lastScanline + width > length)) {
+        if (offset < 0 || (offset + width > length) || lastScanline < 0 || (lastScanline + width > length)) {
             throw new ArrayIndexOutOfBoundsException();
         }
     }
 
-    /**
-     * Shared code to check for illegal arguments passed to getPixel()
-     * or setPixel()
-     *
-     * @param x x coordinate of the pixel
-     * @param y y coordinate of the pixel
-     */
     private void checkPixelAccess(int x, int y) {
         checkXYSign(x, y);
         if (x >= getWidth()) {
@@ -332,22 +457,71 @@ public final class Bitmap {
         }
     }
 
-    public void getPixels(@ColorInt int[] pixels, int offset, int stride,
-                          int x, int y, int width, int height) {
+    public void getPixels(@ColorInt int[] pixels, int offset, int stride, int x, int y, int width, int height) {
         checkPixelsAccess(x, y, width, height, offset, stride, pixels);
-
-        image.getRGB(x, y, width, height, pixels, offset, stride);
+        requireImage().getRGB(x, y, width, height, pixels, offset, stride);
     }
 
     @ColorInt
     public int getPixel(int x, int y) {
         checkPixelAccess(x, y);
-        return image.getRGB(x, y);
+        return requireImage().getRGB(x, y);
+    }
+
+    /**
+     * <p>Write the specified {@link Color} into the bitmap (assuming it is
+     * mutable) at the x,y coordinate. The color must be a
+     * non-premultiplied ARGB value in the {@link ColorSpace.Named#SRGB sRGB}
+     * color space.</p>
+     *
+     * @param x     The x coordinate of the pixel to replace (0...width-1)
+     * @param y     The y coordinate of the pixel to replace (0...height-1)
+     * @param color The ARGB color to write into the bitmap
+     *
+     * @throws IllegalStateException if the bitmap is not mutable
+     * @throws IllegalArgumentException if x, y are outside of the bitmap's
+     *         bounds.
+     */
+    public void setPixel(int x, int y, @ColorInt int color) {
+        checkPixelAccess(x, y);
+        ensureMutableImageBacking().setRGB(x, y, color);
+    }
+
+    /**
+     * <p>Replace pixels in the bitmap with the colors in the array. Each element
+     * in the array is a packed int representing a non-premultiplied ARGB
+     * {@link Color} in the {@link ColorSpace.Named#SRGB sRGB} color space.</p>
+     *
+     * @param pixels   The colors to write to the bitmap
+     * @param offset   The index of the first color to read from pixels[]
+     * @param stride   The number of colors in pixels[] to skip between rows.
+     *                 Normally this value will be the same as the width of
+     *                 the bitmap, but it can be larger (or negative).
+     * @param x        The x coordinate of the first pixel to write to in
+     *                 the bitmap.
+     * @param y        The y coordinate of the first pixel to write to in
+     *                 the bitmap.
+     * @param width    The number of colors to copy from pixels[] per row
+     * @param height   The number of rows to write to the bitmap
+     *
+     * @throws IllegalStateException if the bitmap is not mutable
+     * @throws IllegalArgumentException if x, y, width, height are outside of
+     *         the bitmap's bounds.
+     * @throws ArrayIndexOutOfBoundsException if the pixels array is too small
+     *         to receive the specified number of pixels.
+     */
+    public void setPixels(@NonNull @ColorInt int[] pixels, int offset, int stride,
+            int x, int y, int width, int height) {
+        if (width == 0 || height == 0) {
+            return; // nothing to do
+        }
+        checkPixelsAccess(x, y, width, height, offset, stride, pixels);
+        ensureMutableImageBacking().setRGB(x, y, width, height, pixels, offset, stride);
     }
 
     public void eraseColor(int c) {
         java.awt.Color color = Color.valueOf(c).toJavaColor();
-        Graphics2D graphics = image.createGraphics();
+        Graphics2D graphics = ensureMutableImageBacking().createGraphics();
         graphics.setColor(color);
         graphics.fillRect(0, 0, width, height);
         graphics.dispose();
@@ -359,7 +533,79 @@ public final class Bitmap {
 
     @Nullable
     public final Config getConfig() {
-        int type = image.getType();
+        if (image == null && (nativeImageRef != null || nativeCanvasRef != null)) {
+            return Config.ARGB_8888;
+        }
+        int type = requireImage().getType();
         return bufferedImageTypeToConfig(type);
     }
+
+    private byte[] exportNativeCanvas(long canvasRef) {
+        if (shouldUseNativeImage()) {
+            try {
+                return getImage(canvasRef, CompressFormat.PNG.nativeInt, 90);
+            } catch (UnsatisfiedLinkError error) {
+                disableNativeBridge(error);
+            }
+        }
+        throw new IllegalStateException("Native canvas export requested without a native bridge");
+    }
+
+    private byte[] exportNativeImage(long imageRef) {
+        if (shouldUseNativeImage()) {
+            try {
+                return compressImage(imageRef, CompressFormat.PNG.nativeInt, 90);
+            } catch (UnsatisfiedLinkError error) {
+                disableNativeBridge(error);
+            }
+        }
+        throw new IllegalStateException("Native image export requested without a native bridge");
+    }
+
+    private void releaseNativeObject() {
+        if (nativeImageRef != null) {
+            long address = nativeImageRef.address();
+            nativeImageRef.clear();
+            nativeImageRef = null;
+            if (address != 0 && shouldUseNativeImage()) {
+                try {
+                    releaseNativeImage(address);
+                } catch (UnsatisfiedLinkError error) {
+                    disableNativeBridge(error);
+                }
+            }
+        }
+
+        if (nativeCanvasRef != null) {
+            long address = nativeCanvasRef.address();
+            nativeCanvasRef.clear();
+            nativeCanvasRef = null;
+            if (address != 0 && shouldUseNativeImage()) {
+                try {
+                    releaseNativeCanvas(address);
+                } catch (UnsatisfiedLinkError error) {
+                    disableNativeBridge(error);
+                }
+            }
+        }
+    }
+
+    @Override
+    protected void finalize() {
+        releaseNativeObject();
+    }
+
+    private native long[] createNativeImage(byte[] bytes);
+
+    private native long createNativeCanvas(int width, int height);
+
+    private native void drawBitmap(long imageRef, long canvasRef, int[] src, int[] dst);
+
+    private native byte[] getImage(long canvasRef, int format, int quality);
+
+    private native byte[] compressImage(long imageRef, int format, int quality);
+
+    private native void releaseNativeImage(long imageRef);
+
+    private native void releaseNativeCanvas(long canvasRef);
 }

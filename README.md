@@ -104,22 +104,10 @@ Download the latest `linux-x64`(x86_64) release from [the releases section](http
 
 #### WebView support (GNU/Linux)
 
-WebView support is implemented via [KCEF](https://github.com/DATL4G/KCEF).
-This is optional, and is only necessary to support some extensions.
+Some extensions require WebView support for login or challenge flows.
+Suwayomi now expects those flows to be handled by platform-specific or externally provided WebView integrations instead of an embedded desktop browser stack.
 
-To have a functional WebView, several dependencies are required; aside from X11 libraries necessary for rendering Chromium, some JNI bindings are necessary: gluegen and jogl (found in Ubuntu as `libgluegen2-jni` and `libjogl2-jni`).
-Note that on some systems (e.g. Ubuntu), the JNI libraries are not automatically found, see below.
-
-A KCEF server is launched on startup, which loads the X11 libraries.
-If those are missing, you should see "Could not load 'jcef' library".
-If so, use `ldd ~/.local/share/Tachidesk/bin/kcef/libjcef.so | grep not` to figure out which libraries are not found on your system.
-
-The JNI bindings are only loaded when a browser is actually launched.
-This is done by extensions that rely on WebView, not by Suwayomi itself.
-If there is a problem loading the JNI libraries, you should see a message indicating the library and the search path.
-This search path includes the current working directory, if you do not want to modify system directories.
-
-Refer to the [Dockerfile](https://github.com/Suwayomi/Suwayomi-Server-docker/blob/main/Dockerfile) for more details.
+If you need to share cookies from an external WebView, enable the cookie API and sync them into the server.
 
 ## Other methods of getting Suwayomi
 ### Docker

@@ -1,10 +1,11 @@
 package xyz.nulldev.androidcompat
 
+import android.util.Log
 import android.webkit.WebView
 import xyz.nulldev.androidcompat.config.ApplicationInfoConfigModule
 import xyz.nulldev.androidcompat.config.FilesConfigModule
 import xyz.nulldev.androidcompat.config.SystemConfigModule
-import xyz.nulldev.androidcompat.webkit.KcefWebViewProvider
+import xyz.nulldev.androidcompat.webkit.ManatanCefWebViewProvider
 import xyz.nulldev.ts.config.GlobalConfigManager
 
 /**
@@ -19,7 +20,26 @@ class AndroidCompatInitializer {
             SystemConfigModule.register(GlobalConfigManager.config),
         )
 
-        WebView.setProviderFactory({ view: WebView -> KcefWebViewProvider(view) })
+        val providerName = System.getProperty("manatan.nativeWebViewProvider")?.trim()?.lowercase()
+        val bridgeUrl = System.getProperty("manatan.nativeWebViewBridgeUrl")?.trim().orEmpty()
+
+        if (
+            bridgeUrl.isNotEmpty() ||
+            providerName in
+            setOf(
+                "manatan-cef",
+                "manatan-ios",
+                "manatan-bridge",
+                "manatan-wkwebview",
+            )
+        ) {
+            WebView.setProviderFactory { view: WebView -> ManatanCefWebViewProvider(view) }
+        } else {
+            Log.w(
+                "AndroidCompatInitializer",
+                "No native WebView bridge configured; WebView-backed extensions will be unavailable",
+            )
+        }
 
         // Set some properties extensions use
         System.setProperty(

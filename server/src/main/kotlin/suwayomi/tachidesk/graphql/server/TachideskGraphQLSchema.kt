@@ -51,6 +51,7 @@ import suwayomi.tachidesk.graphql.server.primitives.GraphQLUpload
 import suwayomi.tachidesk.graphql.subscriptions.DownloadSubscription
 import suwayomi.tachidesk.graphql.subscriptions.InfoSubscription
 import suwayomi.tachidesk.graphql.subscriptions.UpdateSubscription
+import suwayomi.tachidesk.server.plugin.ServerPluginRegistry
 import kotlin.reflect.KClass
 import kotlin.reflect.KType
 import kotlin.time.Duration
@@ -100,7 +101,7 @@ val schema =
                 TopLevelObject(SourceQuery()),
                 TopLevelObject(TrackQuery()),
                 TopLevelObject(UpdateQuery()),
-            ),
+            ) + ServerPluginRegistry.plugins.flatMap { it.graphQLQueries() },
         mutations =
             listOf(
                 TopLevelObject(BackupMutation()),
@@ -118,7 +119,7 @@ val schema =
                 TopLevelObject(TrackMutation()),
                 TopLevelObject(UpdateMutation()),
                 TopLevelObject(UserMutation()),
-            ),
+            ) + ServerPluginRegistry.plugins.flatMap { it.graphQLMutations() },
         subscriptions =
             listOf(
                 TopLevelObject(DownloadSubscription()),

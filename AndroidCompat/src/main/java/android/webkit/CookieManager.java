@@ -18,6 +18,15 @@ public abstract class CookieManager {
 
     private static CookieManager INSTANCE = null;
     private static final Object lock = new Object();
+
+    private static boolean useNativeCookieBridge() {
+        String propertyValue = System.getProperty("suwayomi.native.cookie");
+        if (propertyValue == null) {
+            propertyValue = System.getenv("SUWAYOMI_NATIVE_COOKIE");
+        }
+        return propertyValue != null && Boolean.parseBoolean(propertyValue);
+    }
+
     /**
      * Gets the singleton CookieManager instance.
      *
@@ -29,7 +38,7 @@ public abstract class CookieManager {
         } else {
             synchronized (lock) {
                 if (INSTANCE == null) {
-                    INSTANCE = new CookieManagerImpl();
+                    INSTANCE = useNativeCookieBridge() ? new McCookieManager() : new CookieManagerImpl();
                 }
                 return INSTANCE;
             }

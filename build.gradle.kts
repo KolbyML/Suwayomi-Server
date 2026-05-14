@@ -48,9 +48,6 @@ subprojects {
 
     tasks {
         withType<KotlinJvmCompile> {
-            if (plugins.hasPlugin(KtlintPlugin::class)) {
-                dependsOn("ktlintFormat")
-            }
             compilerOptions {
                 jvmTarget = JvmTarget.fromTarget(libs.versions.jvmTarget.get())
                 freeCompilerArgs.add("-Xcontext-receivers")

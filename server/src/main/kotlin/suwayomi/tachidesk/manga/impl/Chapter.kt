@@ -25,7 +25,9 @@ import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.selectAll
+import org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl
 import org.jetbrains.exposed.sql.statements.BatchUpdateStatement
+import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import suwayomi.tachidesk.manga.impl.Manga.getManga
@@ -42,6 +44,7 @@ import suwayomi.tachidesk.manga.model.table.ChapterTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.PageTable
 import suwayomi.tachidesk.manga.model.table.toDataClass
+import suwayomi.tachidesk.server.database.MyBatchInsertStatement
 import suwayomi.tachidesk.server.serverConfig
 import java.time.Instant
 import java.util.TreeSet
@@ -269,40 +272,53 @@ object Chapter {
 
                 transaction {
                     if (chaptersToInsert.isNotEmpty()) {
-                        ChapterTable
-                            .batchInsert(chaptersToInsert) { chapter ->
-                                this[ChapterTable.url] = chapter.url
-                                this[ChapterTable.name] = chapter.name
-                                this[ChapterTable.date_upload] = chapter.uploadDate
-                                this[ChapterTable.chapter_number] = chapter.chapterNumber
-                                this[ChapterTable.scanlator] = chapter.scanlator
-                                this[ChapterTable.sourceOrder] = chapter.index
-                                this[ChapterTable.fetchedAt] = chapter.fetchedAt
-                                this[ChapterTable.manga] = chapter.mangaId
-                                this[ChapterTable.realUrl] = chapter.realUrl
-                                this[ChapterTable.isRead] = false
-                                this[ChapterTable.isBookmarked] = false
-                                this[ChapterTable.isDownloaded] = false
+                        val insertStatement = MyBatchInsertStatement(ChapterTable)
+                        chaptersToInsert.forEach { chapter ->
+                            insertStatement.addBatch()
+                            insertStatement[ChapterTable.url] = chapter.url
+                            insertStatement[ChapterTable.name] = chapter.name
+                            insertStatement[ChapterTable.date_upload] = chapter.uploadDate
+                            insertStatement[ChapterTable.chapter_number] = chapter.chapterNumber
+                            insertStatement[ChapterTable.scanlator] = chapter.scanlator
+                            insertStatement[ChapterTable.sourceOrder] = chapter.index
+                            insertStatement[ChapterTable.fetchedAt] = chapter.fetchedAt
+                            insertStatement[ChapterTable.manga] = chapter.mangaId
+                            insertStatement[ChapterTable.realUrl] = chapter.realUrl
+                            insertStatement[ChapterTable.isRead] = false
+                            insertStatement[ChapterTable.isBookmarked] = false
+                            insertStatement[ChapterTable.isDownloaded] = false
 
-                                // is recognized chapter number
-                                if (chapter.chapterNumber >= 0f && chapter.chapterNumber in deletedChapterNumbers) {
-                                    this[ChapterTable.isRead] = chapter.chapterNumber in deletedReadChapterNumbers
-                                    this[ChapterTable.isBookmarked] = chapter.chapterNumber in deletedBookmarkedChapterNumbers
+                            if (chapter.chapterNumber >= 0f && chapter.chapterNumber in deletedChapterNumbers) {
+                                insertStatement[ChapterTable.isRead] = chapter.chapterNumber in deletedReadChapterNumbers
+                                insertStatement[ChapterTable.isBookmarked] = chapter.chapterNumber in deletedBookmarkedChapterNumbers
 
-                                    // only preserve download status for chapters of the same scanlator, otherwise,
-                                    // the downloaded files won't be found anyway
-                                    val downloadedChapterInfo = deletedDownloadedChapterNumberInfoMap[chapter.chapterNumber]
-                                    val pageCount = downloadedChapterInfo?.get(chapter.scanlator)
-                                    if (pageCount != null) {
-                                        this[ChapterTable.isDownloaded] = true
-                                        this[ChapterTable.pageCount] = pageCount
-                                    }
-                                    // Try to use the fetch date of the original entry to not pollute 'Updates' tab
-                                    deletedChapterNumberDateFetchMap[chapter.chapterNumber]?.let {
-                                        this[ChapterTable.fetchedAt] = it
-                                    }
+                                val downloadedChapterInfo = deletedDownloadedChapterNumberInfoMap[chapter.chapterNumber]
+                                val pageCount = downloadedChapterInfo?.get(chapter.scanlator)
+                                if (pageCount != null) {
+                                    insertStatement[ChapterTable.isDownloaded] = true
+                                    insertStatement[ChapterTable.pageCount] = pageCount
                                 }
-                            }.forEach { insertedChapters.add(ChapterTable.toDataClass(it)) }
+                                deletedChapterNumberDateFetchMap[chapter.chapterNumber]?.let {
+                                    insertStatement[ChapterTable.fetchedAt] = it
+                                }
+                            }
+                        }
+
+                        val sql = insertStatement.prepareSQL(this, prepared = false)
+                        val connection = (TransactionManager.current().connection as JdbcConnectionImpl).connection
+                        connection.createStatement().use { statement ->
+                            statement.execute(sql)
+                        }
+
+                        val insertedRowsByUrl =
+                            ChapterTable
+                                .selectAll()
+                                .where { (ChapterTable.manga eq mangaId) and (ChapterTable.url inList chaptersToInsert.map { it.url }) }
+                                .associateBy { it[ChapterTable.url] }
+
+                        chaptersToInsert
+                            .mapNotNull { insertedRowsByUrl[it.url] }
+                            .forEach { insertedChapters.add(ChapterTable.toDataClass(it)) }
                     }
 
                     if (chaptersToUpdate.isNotEmpty()) {

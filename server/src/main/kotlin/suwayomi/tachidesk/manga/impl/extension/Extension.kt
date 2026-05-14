@@ -14,6 +14,8 @@ import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.Source
 import eu.kanade.tachiyomi.source.SourceFactory
 import io.github.oshai.kotlinlogging.KotlinLogging
+import net.dongliu.apk.parser.ApkFile
+import net.dongliu.apk.parser.bean.Icon
 import okhttp3.CacheControl
 import okio.buffer
 import okio.sink
@@ -37,9 +39,12 @@ import suwayomi.tachidesk.manga.impl.util.PackageTools.getPackageInfo
 import suwayomi.tachidesk.manga.impl.util.PackageTools.loadExtensionSources
 import suwayomi.tachidesk.manga.impl.util.network.await
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource
+import suwayomi.tachidesk.manga.impl.util.storage.ImageResponse.clearCachedImage
 import suwayomi.tachidesk.manga.impl.util.storage.ImageResponse.getImageResponse
+import suwayomi.tachidesk.manga.impl.util.storage.ImageResponse.saveImage
 import suwayomi.tachidesk.manga.model.table.ExtensionTable
 import suwayomi.tachidesk.manga.model.table.SourceTable
+import suwayomi.tachidesk.server.RuntimeMode
 import suwayomi.tachidesk.server.ApplicationDirs
 import uy.kohesive.injekt.injectLazy
 import java.io.File
@@ -59,12 +64,31 @@ object Extension {
 
     suspend fun installExtension(pkgName: String): Int {
         logger.debug { "Installing $pkgName" }
-        val extensionRecord = extensionTableAsDataClass().first { it.pkgName == pkgName }
+        val extensionRecord = extensionTableAsDataClass().firstOrNull { it.pkgName == pkgName }
+        val repo = extensionRecord?.repo
+
+        if (extensionRecord == null || repo == null) {
+            val localApk = findLocalExtensionApk(pkgName)
+            if (localApk != null) {
+                logger.warn { "Installing $pkgName from local apk ${localApk.name}" }
+                return installAPK {
+                    localApk.absolutePath
+                }
+            }
+        }
+
+        if (extensionRecord == null) {
+            throw NoSuchElementException("Extension not found: $pkgName")
+        }
+
+        if (repo == null) {
+            throw NullPointerException("Could not find extension repo for $pkgName")
+        }
 
         return installAPK {
             val apkURL =
                 ExtensionGithubApi.getApkUrl(
-                    extensionRecord.repo ?: throw NullPointerException("Could not find extension repo"),
+                    repo,
                     extensionRecord.apkName,
                 )
             val apkName = Uri.parse(apkURL).lastPathSegment!!
@@ -86,13 +110,16 @@ object Extension {
             check(downloadedFile.startsWith(rootPath) && downloadedFile.parent == rootPath) {
                 "File '$apkName' is not a valid extension file"
             }
-            logger.debug { "Saving apk at $apkName" }
+            logger.info { "Saving extension apk at ${downloadedFile.toAbsolutePath()}" }
             // download apk file
             downloadedFile.outputStream().sink().buffer().use { sink ->
                 inputStream.source().use { source ->
                     sink.writeAll(source)
                     sink.flush()
                 }
+            }
+            logger.info {
+                "Saved extension apk: ${downloadedFile.toAbsolutePath()} size=${downloadedFile.toFile().length()}"
             }
             downloadedFile.absolutePathString()
         }
@@ -102,7 +129,13 @@ object Extension {
         fetcher: suspend () -> String,
     ): Int {
         val apkFilePath = fetcher()
-        val apkName = File(apkFilePath).name
+        val apkFile = File(apkFilePath)
+        if (!apkFile.exists()) {
+            logger.error { "Extension apk missing at $apkFilePath" }
+            throw java.io.FileNotFoundException("Extension apk missing at $apkFilePath")
+        }
+        val apkName = apkFile.name
+        logger.info { "Installing extension from apk=$apkName size=${apkFile.length()}" }
 
         // check if we don't have the extension already installed
         // if it's installed and we want to update, it first has to be uninstalled
@@ -115,12 +148,11 @@ object Extension {
 
         val dirPathWithoutType = "${applicationDirs.extensionsRoot}/$fileNameWithoutType"
         val jarFilePath = "$dirPathWithoutType.jar"
-        val dexFilePath = "$dirPathWithoutType.dex"
 
         val packageInfo = getPackageInfo(apkFilePath)
         val pkgName = packageInfo.packageName
         if (isInstalled && forceReinstall) {
-            uninstallExtension(pkgName)
+            uninstallExtension(pkgName, apkName)
         }
 
         if (!isInstalled || forceReinstall) {
@@ -155,76 +187,118 @@ object Extension {
 
             dex2jar(apkFilePath, jarFilePath, fileNameWithoutType)
             extractAssetsFromApk(apkFilePath, jarFilePath)
+            extractAndCacheApkIcon(apkFilePath, apkName)
 
             // clean up
-            File(apkFilePath).delete()
-            File(dexFilePath).delete()
+            if (!RuntimeMode.isRuntimeOnly()) {
+                File(apkFilePath).delete()
+            }
 
-            // collect sources from the extension
-            val extensionMainClassInstance = loadExtensionSources(jarFilePath, className)
-            val sources: List<CatalogueSource> =
-                when (extensionMainClassInstance) {
-                    is Source -> listOf(extensionMainClassInstance)
-                    is SourceFactory -> extensionMainClassInstance.createSources()
-                    else -> throw RuntimeException("Unknown source class type! ${extensionMainClassInstance.javaClass}")
-                }.map { it as CatalogueSource }
+            try {
+                // collect sources from the extension
+                val extensionMainClassInstance = loadExtensionSources(jarFilePath, className)
+                val sources: List<CatalogueSource> =
+                    when (extensionMainClassInstance) {
+                        is Source -> listOf(extensionMainClassInstance)
+                        is SourceFactory -> extensionMainClassInstance.createSources()
+                        else -> throw RuntimeException("Unknown source class type! ${extensionMainClassInstance.javaClass}")
+                    }.map { it as CatalogueSource }
 
-            val langs = sources.map { it.lang }.toSet()
-            val extensionLang =
-                when (langs.size) {
-                    0 -> ""
-                    1 -> langs.first()
-                    else -> "all"
+                if (sources.isEmpty()) {
+                    logger.warn { "No sources returned for $pkgName class=$className" }
                 }
 
-            val extensionName =
-                packageInfo.applicationInfo.nonLocalizedLabel
-                    .toString()
-                    .substringAfter("Tachiyomi: ")
+                val langs = sources.map { it.lang }.toSet()
+                val extensionLang =
+                    when (langs.size) {
+                        0 -> ""
+                        1 -> langs.first()
+                        else -> "all"
+                    }
 
-            // update extension info
-            transaction {
-                if (ExtensionTable.selectAll().where { ExtensionTable.pkgName eq pkgName }.firstOrNull() == null) {
-                    ExtensionTable.insert {
+                val extensionName =
+                    packageInfo.applicationInfo.nonLocalizedLabel
+                        .toString()
+                        .substringAfter("Tachiyomi: ")
+
+                // update extension info
+                transaction {
+                    if (ExtensionTable.selectAll().where { ExtensionTable.pkgName eq pkgName }.firstOrNull() == null) {
+                        ExtensionTable.insert {
+                            it[this.apkName] = apkName
+                            it[name] = extensionName
+                            it[this.pkgName] = packageInfo.packageName
+                            it[versionName] = packageInfo.versionName
+                            it[versionCode] = packageInfo.versionCode
+                            it[lang] = extensionLang
+                            it[this.isNsfw] = isNsfw
+                        }
+                    }
+
+                    ExtensionTable.update({ ExtensionTable.pkgName eq pkgName }) {
                         it[this.apkName] = apkName
-                        it[name] = extensionName
-                        it[this.pkgName] = packageInfo.packageName
+                        it[this.isInstalled] = true
+                        it[this.classFQName] = className
                         it[versionName] = packageInfo.versionName
                         it[versionCode] = packageInfo.versionCode
-                        it[lang] = extensionLang
-                        it[this.isNsfw] = isNsfw
+                    }
+
+                    val extensionId =
+                        ExtensionTable
+                            .selectAll()
+                            .where { ExtensionTable.pkgName eq pkgName }
+                            .first()[ExtensionTable.id]
+                            .value
+
+                    sources.forEach { httpSource ->
+                        SourceTable.insert {
+                            it[id] = httpSource.id
+                            it[name] = httpSource.name
+                            it[lang] = httpSource.lang
+                            it[extension] = extensionId
+                            it[SourceTable.isNsfw] = isNsfw
+                        }
+                        logger.debug { "Installed source ${httpSource.name} (${httpSource.lang}) with id:${httpSource.id}" }
                     }
                 }
+                return 201 // we installed successfully
+            } catch (e: Throwable) {
+                // free up the file descriptor if exists
+                PackageTools.jarLoaderMap.remove(jarFilePath)?.close()
+                File(jarFilePath).delete()
 
-                ExtensionTable.update({ ExtensionTable.pkgName eq pkgName }) {
-                    it[this.apkName] = apkName
-                    it[this.isInstalled] = true
-                    it[this.classFQName] = className
-                    it[versionName] = packageInfo.versionName
-                    it[versionCode] = packageInfo.versionCode
-                }
-
-                val extensionId =
-                    ExtensionTable
-                        .selectAll()
-                        .where { ExtensionTable.pkgName eq pkgName }
-                        .first()[ExtensionTable.id]
-                        .value
-
-                sources.forEach { httpSource ->
-                    SourceTable.insert {
-                        it[id] = httpSource.id
-                        it[name] = httpSource.name
-                        it[lang] = httpSource.lang
-                        it[extension] = extensionId
-                        it[SourceTable.isNsfw] = isNsfw
-                    }
-                    logger.debug { "Installed source ${httpSource.name} (${httpSource.lang}) with id:${httpSource.id}" }
-                }
+                uninstallExtension(pkgName, if (RuntimeMode.isRuntimeOnly()) apkName else null)
+                throw e
             }
-            return 201 // we installed successfully
         } else {
             return 302 // extension was already installed
+        }
+    }
+
+    private fun extractAndCacheApkIcon(
+        apkFilePath: String,
+        apkName: String,
+    ) {
+        val iconCacheDir = "${applicationDirs.extensionsRoot}/icon"
+        try {
+            val iconData =
+                ApkFile(File(apkFilePath)).use { apk ->
+                    apk.allIcons
+                        .filterIsInstance<Icon>()
+                        .mapNotNull { it.data?.let { data -> data to it.density } }
+                        .maxByOrNull { (_, density) -> density }
+                        ?.first
+                }
+            if (iconData == null) {
+                logger.warn { "No icon found in APK $apkName" }
+                return
+            }
+
+            File(iconCacheDir).mkdirs()
+            clearCachedImage(iconCacheDir, apkName)
+            saveImage("$iconCacheDir/$apkName", iconData.inputStream(), null)
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to extract icon from APK $apkName" }
         }
     }
 
@@ -301,12 +375,22 @@ object Extension {
         }
     }
 
-    fun uninstallExtension(pkgName: String) {
+    fun uninstallExtension(
+        pkgName: String,
+        keepApkName: String? = null,
+    ) {
         logger.debug { "Uninstalling $pkgName" }
 
-        val extensionRecord = transaction { ExtensionTable.selectAll().where { ExtensionTable.pkgName eq pkgName }.first() }
-        val fileNameWithoutType = extensionRecord[ExtensionTable.apkName].substringBefore(".apk")
+        val extensionRecord =
+            transaction { ExtensionTable.selectAll().where { ExtensionTable.pkgName eq pkgName }.firstOrNull() }
+        if (extensionRecord == null) {
+            logger.warn { "Extension not found for uninstall: $pkgName" }
+            return
+        }
+        val installedApkName = extensionRecord[ExtensionTable.apkName]
+        val fileNameWithoutType = installedApkName.substringBefore(".apk")
         val jarPath = "${applicationDirs.extensionsRoot}/$fileNameWithoutType.jar"
+        val apkPath = "${applicationDirs.extensionsRoot}/$installedApkName"
         val sources =
             transaction {
                 val extensionId = extensionRecord[ExtensionTable.id].value
@@ -335,6 +419,11 @@ object Extension {
 
             File(jarPath).delete()
         }
+
+        val shouldDeleteApk = keepApkName == null || keepApkName != installedApkName
+        if (shouldDeleteApk && File(apkPath).exists()) {
+            File(apkPath).delete()
+        }
     }
 
     suspend fun updateExtension(pkgName: String): Int {
@@ -355,23 +444,55 @@ object Extension {
         return installExtension(pkgName)
     }
 
-    suspend fun getExtensionIcon(apkName: String): Pair<InputStream, String> {
+    suspend fun getExtensionIcon(apkName: String): Pair<InputStream, String>? {
         val iconUrl =
             if (apkName == "localSource") {
                 ""
             } else {
-                transaction { ExtensionTable.selectAll().where { ExtensionTable.apkName eq apkName }.first() }[ExtensionTable.iconUrl]
+                transaction { ExtensionTable.selectAll().where { ExtensionTable.apkName eq apkName }.firstOrNull() }
+                    ?.get(ExtensionTable.iconUrl)
+                    .orEmpty()
             }
 
         val cacheSaveDir = "${applicationDirs.extensionsRoot}/icon"
+        val hasValidIconUrl = iconUrl.hasHttpScheme()
 
-        return getImageResponse(cacheSaveDir, apkName) {
-            network.client
-                .newCall(
-                    GET(iconUrl, cache = CacheControl.FORCE_NETWORK),
-                ).await()
+        if (!hasValidIconUrl) {
+            logger.warn { "Invalid icon URL for extension apk=$apkName iconUrl='$iconUrl'" }
+            return null
+        }
+
+        return runCatching {
+            getImageResponse(cacheSaveDir, apkName) {
+                network.client
+                    .newCall(
+                        GET(iconUrl, cache = CacheControl.FORCE_NETWORK),
+                    ).await()
+            }
+        }.getOrElse { error ->
+            logger.warn(error) { "Failed to fetch icon for extension apk=$apkName iconUrl='$iconUrl'" }
+            null
         }
     }
 
     fun getExtensionIconUrl(apkName: String): String = "/api/v1/extension/icon/$apkName"
+
+    private fun String.hasHttpScheme(): Boolean =
+        startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+
+    private fun findLocalExtensionApk(pkgName: String): File? {
+        val root = File(applicationDirs.extensionsRoot)
+        val apks = root.listFiles { file -> file.isFile && file.extension == "apk" }.orEmpty()
+        if (apks.isEmpty()) {
+            return null
+        }
+        return apks.firstOrNull { apk ->
+            runCatching {
+                PackageTools.getPackageInfo(apk.absolutePath).packageName == pkgName
+            }.getOrElse {
+                logger.warn(it) { "Failed reading extension metadata for ${apk.name}" }
+                false
+            }
+        }
+    }
 }

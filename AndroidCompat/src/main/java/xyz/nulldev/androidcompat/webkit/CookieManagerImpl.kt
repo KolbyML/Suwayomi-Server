@@ -9,10 +9,20 @@ import java.net.URI
 
 @Suppress("DEPRECATION")
 class CookieManagerImpl : CookieManager() {
-    private val cookieHandler = CookieHandler.getDefault() as java.net.CookieManager
     private var acceptCookie = true
     private var acceptThirdPartyCookies = true
     private var allowFileSchemeCookies = false
+
+    private fun cookieHandler(): java.net.CookieManager {
+        val existing = CookieHandler.getDefault()
+        if (existing is java.net.CookieManager) {
+            return existing
+        }
+
+        val manager = java.net.CookieManager()
+        CookieHandler.setDefault(manager)
+        return manager
+    }
 
     override fun setAcceptCookie(accept: Boolean) {
         acceptCookie = accept
@@ -33,6 +43,10 @@ class CookieManagerImpl : CookieManager() {
         url: String,
         value: String?,
     ) {
+        if (!acceptCookie || value == null) {
+            return
+        }
+
         val uri =
             if (url.startsWith("http")) {
                 URI(url)
@@ -41,7 +55,7 @@ class CookieManagerImpl : CookieManager() {
             }
 
         HttpCookie.parse(value).forEach {
-            cookieHandler.cookieStore.add(uri, it)
+            cookieHandler().cookieStore.add(uri, it)
         }
     }
 
@@ -55,13 +69,17 @@ class CookieManagerImpl : CookieManager() {
     }
 
     override fun getCookie(url: String): String {
+        if (!acceptCookie) {
+            return ""
+        }
+
         val uri =
             if (url.startsWith("http")) {
                 URI(url)
             } else {
                 URI("http://$url")
             }
-        return cookieHandler.cookieStore
+        return cookieHandler().cookieStore
             .get(uri)
             .joinToString("; ") { "${it.name}=${it.value}" }
     }
@@ -76,15 +94,15 @@ class CookieManagerImpl : CookieManager() {
 
     @Deprecated("Deprecated in Java")
     override fun removeAllCookie() {
-        cookieHandler.cookieStore.removeAll()
+        cookieHandler().cookieStore.removeAll()
     }
 
     override fun removeAllCookies(callback: ValueCallback<Boolean>?) {
-        val removedCookies = cookieHandler.cookieStore.removeAll()
+        val removedCookies = cookieHandler().cookieStore.removeAll()
         callback?.onReceiveValue(removedCookies)
     }
 
-    override fun hasCookies(): Boolean = cookieHandler.cookieStore.cookies.isNotEmpty()
+    override fun hasCookies(): Boolean = cookieHandler().cookieStore.cookies.isNotEmpty()
 
     override fun flush() {}
 

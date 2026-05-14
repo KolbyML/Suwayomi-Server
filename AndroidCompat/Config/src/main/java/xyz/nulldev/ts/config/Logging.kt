@@ -19,6 +19,7 @@ import io.github.oshai.kotlinlogging.DelegatingKLogger
 import io.github.oshai.kotlinlogging.KotlinLogging
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import java.io.File
 
 private fun fileSizeValueOfOrDefault(
     fileSizeStr: String,
@@ -89,9 +90,19 @@ fun initLoggerConfig(
 ) {
     val context = LoggerFactory.getILoggerFactory() as LoggerContext
     val logger = getBaseLogger()
+    val configuredLogDir =
+        System
+            .getProperty("suwayomi.tachidesk.config.server.logDir")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: "$appRootPath/logs"
+
+    File(configuredLogDir).mkdirs()
 
     // logback logs to the console by default (at least when adding a console appender logs in the console are duplicated)
-    logger.addAppender(createRollingFileAppender(context, "$appRootPath/logs", maxFiles, maxFileSize, maxTotalSize))
+    logger.addAppender(
+        createRollingFileAppender(context, configuredLogDir, maxFiles, maxFileSize, maxTotalSize),
+    )
 
     // set "kotlin exposed" log level
     setLogLevelFor("Exposed", Level.ERROR)

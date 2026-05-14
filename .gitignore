@@ -21,3 +21,10 @@ scripts/zulu*
 scripts/electron-*
 scripts/rcedit-*
 scripts/resources/*.so
+
+# Eclipse/IDE build outputs
+.classpath
+.project
+.settings/
+**/bin/
+**/*.class

@@ -5,7 +5,6 @@ import okhttp3.Cookie
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okio.withLock
-import java.net.CookieStore
 import java.net.HttpCookie
 import java.net.URI
 import java.util.concurrent.locks.ReentrantLock
@@ -15,7 +14,7 @@ import kotlin.time.Duration.Companion.seconds
 // from TachiWeb-Server
 class PersistentCookieStore(
     context: Context,
-) : CookieStore {
+) : RuntimeCookieStore {
     private val cookieMap = mutableMapOf<String, List<Cookie>>()
     private val prefs = context.getSharedPreferences("cookie_store", Context.MODE_PRIVATE)
 
@@ -53,7 +52,7 @@ class PersistentCookieStore(
         }
     }
 
-    fun addAll(
+    override fun addAll(
         url: HttpUrl,
         cookies: List<Cookie>,
     ) {
@@ -93,6 +92,20 @@ class PersistentCookieStore(
         }
     }
 
+    override fun remove(url: HttpUrl) {
+        lock.withLock {
+            val matchingDomains =
+                cookieMap.keys.filter { domain ->
+                    domain == url.host || url.host.endsWith(".$domain")
+                }
+            if (matchingDomains.isEmpty()) return@withLock
+            prefs.edit().apply {
+                matchingDomains.forEach(::remove)
+            }.apply()
+            matchingDomains.forEach(cookieMap::remove)
+        }
+    }
+
     override fun get(uri: URI): List<HttpCookie> {
         val url = uri.toURL()
         return get(url.toHttpUrlOrNull()!!).map {
@@ -100,12 +113,11 @@ class PersistentCookieStore(
         }
     }
 
-    fun get(url: HttpUrl): List<Cookie> =
+    override fun get(url: HttpUrl): List<Cookie> =
         lock.withLock {
-            cookieMap.entries
-                .filter {
-                    url.host.endsWith(it.key)
-                }.flatMap { it.value }
+            cookieMap.values
+                .flatMap { it }
+                .filter { it.matches(url) }
         }
 
     override fun add(
@@ -136,7 +148,7 @@ class PersistentCookieStore(
             }
         }
 
-    fun getStoredCookies(): List<Cookie> =
+    override fun getStoredCookies(): List<Cookie> =
         lock.withLock {
             cookieMap.values.flatMap { it }
         }

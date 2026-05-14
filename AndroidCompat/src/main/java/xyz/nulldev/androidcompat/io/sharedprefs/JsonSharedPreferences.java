@@ -168,7 +168,18 @@ public class JsonSharedPreferences implements SharedPreferences {
 
     @Override
     public synchronized String getString(String s, String s1) {
-        return fallbackIfNull((String) prefs.get(s), s1);
+        String value = fallbackIfNull((String) prefs.get(s), s1);
+        return normalizeStringPreference(s, value);
+    }
+
+    private String normalizeStringPreference(String key, String value) {
+        if (value == null) {
+            return null;
+        }
+        if ("host_url".equals(key)) {
+            return value.replaceAll("/+$", "");
+        }
+        return value;
     }
 
     @Override

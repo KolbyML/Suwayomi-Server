@@ -1,13 +1,9 @@
 package android.graphics;
 
-import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.IOException;
-import java.util.Iterator;
-import javax.imageio.ImageIO;
-import javax.imageio.ImageReader;
-import javax.imageio.stream.ImageInputStream;
 import androidx.annotation.Nullable;
 
 public class BitmapFactory {
@@ -459,39 +455,29 @@ public class BitmapFactory {
         if (is == null) return null;
         if (outPadding != null) throw new RuntimeException("OutPadding is not implemented");
         Options.validate(opts);
-        Bitmap bitmap = null;
-        // TODO: Support options with in parameters
-
         try {
-            ImageInputStream imageInputStream = ImageIO.createImageInputStream(is);
-            Iterator<ImageReader> imageReaders = ImageIO.getImageReaders(imageInputStream);
-
-            if (!imageReaders.hasNext()) {
-                throw new IllegalArgumentException("no reader for image");
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            byte[] data = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = is.read(data, 0, data.length)) != -1) {
+                buffer.write(data, 0, bytesRead);
             }
 
-            ImageReader imageReader = imageReaders.next();
-            imageReader.setInput(imageInputStream);
-
+            Bitmap bitmap = Bitmap.createBitmap(buffer.toByteArray());
             if (opts != null) {
-                opts.outHeight = imageReader.getHeight(0);
-                opts.outWidth = imageReader.getWidth(0);
-                opts.outMimeType = imageReader.getOriginatingProvider().getMIMETypes()[0];
-                opts.outColorSpace = null; // TODO: support? see imageReader.getImageTypeSpecifier().getColorSpace()
-                opts.outConfig = null; // TODO: support?
+                opts.outHeight = bitmap.getHeight();
+                opts.outWidth = bitmap.getWidth();
+                opts.outMimeType = null;
+                opts.outColorSpace = null;
+                opts.outConfig = bitmap.getConfig();
+                if (opts.inJustDecodeBounds) {
+                    return null;
+                }
             }
-
-            if (opts == null || !opts.inJustDecodeBounds) {
-                BufferedImage image = imageReader.read(0, imageReader.getDefaultReadParam());
-                bitmap = new Bitmap(image);
-            }
-
-            imageReader.dispose();
+            return bitmap;
         } catch (IOException ex) {
             throw new RuntimeException(ex);
         }
-
-        return bitmap;
     }
 
     public static Bitmap decodeByteArray(byte[] data, int offset, int length) {

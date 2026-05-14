@@ -12,7 +12,22 @@ import kotlin.math.min
 open class PaginatedList<T>(
     val page: List<T>,
     val hasNextPage: Boolean,
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PaginatedList<*>) return false
+        return page == other.page && hasNextPage == other.hasNextPage
+    }
+
+    override fun hashCode(): Int {
+        var result = page.hashCode()
+        result = 31 * result + hasNextPage.hashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "PaginatedList(page=$page, hasNextPage=$hasNextPage)"
+}
 
 const val PAGINATION_FACTOR = 50
 

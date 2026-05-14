@@ -70,10 +70,6 @@ jobs:
           timeout 30s java -DcrashOnFailedMigration=true \
               -Dsuwayomi.tachidesk.config.server.systemTrayEnabled=false \
               -Dsuwayomi.tachidesk.config.server.initialOpenInBrowserEnabled=false \
-              -Dsuwayomi.tachidesk.config.server.databaseType=POSTGRESQL \
-              -Dsuwayomi.tachidesk.config.server.databaseUrl=postgresql://localhost:5432/postgres \
-              -Dsuwayomi.tachidesk.config.server.databaseUsername=postgres \
-              -Dsuwayomi.tachidesk.config.server.databasePassword=postgres \
               -jar "$JAR"
 
           ecode="$?"
@@ -117,4 +113,3 @@ jobs:
           if [ -n "$f" ]; then
             exit 1
           fi
-

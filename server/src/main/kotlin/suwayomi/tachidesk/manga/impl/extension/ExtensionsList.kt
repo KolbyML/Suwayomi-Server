@@ -14,10 +14,11 @@ import kotlinx.coroutines.sync.withLock
 import org.jetbrains.exposed.dao.id.EntityID
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
-import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.BatchUpdateStatement
+import org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl
+import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import suwayomi.tachidesk.manga.impl.extension.Extension.getExtensionIconUrl
@@ -25,12 +26,17 @@ import suwayomi.tachidesk.manga.impl.extension.github.ExtensionGithubApi
 import suwayomi.tachidesk.manga.impl.extension.github.OnlineExtension
 import suwayomi.tachidesk.manga.model.dataclass.ExtensionDataClass
 import suwayomi.tachidesk.manga.model.table.ExtensionTable
+import suwayomi.tachidesk.server.ApplicationDirs
+import suwayomi.tachidesk.server.database.MyBatchInsertStatement
 import suwayomi.tachidesk.server.serverConfig
+import uy.kohesive.injekt.injectLazy
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
 
 object ExtensionsList {
     private val logger = KotlinLogging.logger {}
+    private val applicationDirs: ApplicationDirs by injectLazy()
 
     var lastUpdateCheck: Long = 0
     var updateMap = ConcurrentHashMap<String, OnlineExtension>()
@@ -66,25 +72,45 @@ object ExtensionsList {
 
     suspend fun getExtensionList(): List<ExtensionDataClass> {
         fetchExtensionsCached()
-        return extensionTableAsDataClass()
+        val extensions = extensionTableAsDataClass()
+        val installed = extensions.filter { it.installed }
+        val missingJar = installed.count { extension ->
+            val jarPath = "${applicationDirs.extensionsRoot}/${extension.apkName.substringBefore(".apk")}.jar"
+            !File(jarPath).exists()
+        }
+        logger.info {
+            "extension list total=${extensions.size} installed=${installed.size} missingJar=${missingJar}"
+        }
+        return extensions
     }
 
     fun extensionTableAsDataClass() =
         transaction {
-            ExtensionTable.selectAll().filter { it[ExtensionTable.name] != LocalSource.EXTENSION_NAME }.map {
+            ExtensionTable.selectAll().filter { it[ExtensionTable.name] != LocalSource.EXTENSION_NAME }.map { row ->
+                val apkName = row[ExtensionTable.apkName]
+                val className = row[ExtensionTable.classFQName].takeIf { value -> value.isNotBlank() }
+                val jarPath =
+                    apkName
+                        .takeIf { value -> value.endsWith(".apk", ignoreCase = true) }
+                        ?.let { value ->
+                            "${applicationDirs.extensionsRoot}/${File(value).nameWithoutExtension}.jar"
+                        }
+                        ?.takeIf { row[ExtensionTable.isInstalled] }
                 ExtensionDataClass(
-                    it[ExtensionTable.repo],
-                    it[ExtensionTable.apkName],
-                    getExtensionIconUrl(it[ExtensionTable.apkName]),
-                    it[ExtensionTable.name],
-                    it[ExtensionTable.pkgName],
-                    it[ExtensionTable.versionName],
-                    it[ExtensionTable.versionCode],
-                    it[ExtensionTable.lang],
-                    it[ExtensionTable.isNsfw],
-                    it[ExtensionTable.isInstalled],
-                    it[ExtensionTable.hasUpdate],
-                    it[ExtensionTable.isObsolete],
+                    row[ExtensionTable.repo],
+                    apkName,
+                    getExtensionIconUrl(apkName),
+                    row[ExtensionTable.name],
+                    row[ExtensionTable.pkgName],
+                    row[ExtensionTable.versionName],
+                    row[ExtensionTable.versionCode],
+                    row[ExtensionTable.lang],
+                    row[ExtensionTable.isNsfw],
+                    row[ExtensionTable.isInstalled],
+                    row[ExtensionTable.hasUpdate],
+                    row[ExtensionTable.isObsolete],
+                    className,
+                    jarPath,
                 )
             }
         }
@@ -179,16 +205,24 @@ object ExtensionsList {
                     }
                 }
                 if (extensionsToInsert.isNotEmpty()) {
-                    ExtensionTable.batchInsert(extensionsToInsert) { foundExtension ->
-                        this[ExtensionTable.repo] = foundExtension.repo
-                        this[ExtensionTable.name] = foundExtension.name
-                        this[ExtensionTable.pkgName] = foundExtension.pkgName
-                        this[ExtensionTable.versionName] = foundExtension.versionName
-                        this[ExtensionTable.versionCode] = foundExtension.versionCode
-                        this[ExtensionTable.lang] = foundExtension.lang
-                        this[ExtensionTable.isNsfw] = foundExtension.isNsfw
-                        this[ExtensionTable.apkName] = foundExtension.apkName
-                        this[ExtensionTable.iconUrl] = foundExtension.iconUrl
+                    val insertStatement = MyBatchInsertStatement(ExtensionTable)
+                    extensionsToInsert.forEach { foundExtension ->
+                        insertStatement.addBatch()
+                        insertStatement[ExtensionTable.repo] = foundExtension.repo
+                        insertStatement[ExtensionTable.name] = foundExtension.name
+                        insertStatement[ExtensionTable.pkgName] = foundExtension.pkgName
+                        insertStatement[ExtensionTable.versionName] = foundExtension.versionName
+                        insertStatement[ExtensionTable.versionCode] = foundExtension.versionCode
+                        insertStatement[ExtensionTable.lang] = foundExtension.lang
+                        insertStatement[ExtensionTable.isNsfw] = foundExtension.isNsfw
+                        insertStatement[ExtensionTable.apkName] = foundExtension.apkName
+                        insertStatement[ExtensionTable.iconUrl] = foundExtension.iconUrl
+                    }
+
+                    val sql = insertStatement.prepareSQL(this, prepared = false)
+                    val connection = (TransactionManager.current().connection as JdbcConnectionImpl).connection
+                    connection.createStatement().use { statement ->
+                        statement.execute(sql)
                     }
                 }
 

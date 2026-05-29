@@ -14,15 +14,11 @@ public class McCookieManager extends CookieManager {
     static {
         boolean available;
         try {
-            // Probe the native method to detect if the JNI binding exists.
-            // On iOS/Android the native library is loaded before the JVM
-            // starts, so this succeeds.  On desktop (macOS/Linux/Windows)
-            // no native library provides the symbol and the call throws
-            // UnsatisfiedLinkError, which we catch once here so that every
-            // subsequent cookie operation falls back to the no-op path
-            // instead of crashing the OkHttp interceptor chain.
-            nativeGetCookie0("http://probe.invalid".getBytes(StandardCharsets.UTF_8));
-            available = true;
+            // Detect whether the JNI binding exists without touching the
+            // platform cookie/network stack. A cookie lookup can involve
+            // CFNetwork state on iOS, which may block when a VPN route exists
+            // but the device is otherwise offline.
+            available = nativeIsAvailable0();
         } catch (UnsatisfiedLinkError e) {
             available = false;
             Log.w(TAG, "Native cookie bridge not linked, disabling McCookieManager", e);
@@ -171,6 +167,7 @@ public class McCookieManager extends CookieManager {
         return value == null ? null : value.getBytes(StandardCharsets.UTF_8);
     }
 
+    private static native boolean nativeIsAvailable0();
     private static native byte[] nativeGetCookie0(byte[] urlUtf8);
     private static native void nativeSetCookie0(byte[] urlUtf8, byte[] valueUtf8);
 }

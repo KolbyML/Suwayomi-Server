@@ -179,6 +179,16 @@ object ExtensionsList {
                                         // somehow the user installed an invalid version
                                         this[ExtensionTable.isObsolete] = true
                                     }
+
+                                    else -> {
+                                        // Installed version matches the repo: clear any stale
+                                        // update flag. Updates driven through the desktop file
+                                        // install path never pass through updateExtension(),
+                                        // so carrying the previous flag forward here would pin
+                                        // "update pending" forever after a successful update.
+                                        this[ExtensionTable.hasUpdate] = false
+                                        updateMap.remove(foundExtension.pkgName)
+                                    }
                                 }
                             }
                             execute(this@transaction)

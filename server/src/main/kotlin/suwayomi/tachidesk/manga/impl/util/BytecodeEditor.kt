@@ -15,11 +15,11 @@ import org.objectweb.asm.FieldVisitor
 import org.objectweb.asm.Handle
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
-import kotlin.streams.asSequence
 
 object BytecodeEditor {
     private val logger = KotlinLogging.logger {}
@@ -30,15 +30,40 @@ object BytecodeEditor {
      * @param jarFile The JarFile to replace class references in
      */
     fun fixAndroidClasses(jarFile: Path) {
-        FileSystems.newFileSystem(jarFile, null as ClassLoader?)?.use {
-            Files
-                .walk(it.getPath("/"))
-                .asSequence()
-                .filterNotNull()
-                .filterNot(Files::isDirectory)
-                .mapNotNull(::getClassBytes)
-                .map(::transform)
-                .forEach(::write)
+        rewriteClasses(jarFile, replaceAndroidClasses = true)
+    }
+
+    /**
+     * Rebuild stack map frames in an already converted extension jar.
+     *
+     * Some JVMs accept the frame-less Java 6 bytecode emitted by dex2jar while stricter
+     * verifiers reject it. This is separate from [fixAndroidClasses] so callers can safely
+     * repair existing jars without applying the Android class substitutions a second time.
+     */
+    fun repairStackMapFrames(jarFile: Path) {
+        rewriteClasses(jarFile, replaceAndroidClasses = false)
+    }
+
+    private fun rewriteClasses(
+        jarFile: Path,
+        replaceAndroidClasses: Boolean,
+    ) {
+        FileSystems.newFileSystem(jarFile, null as ClassLoader?)?.use { fileSystem ->
+            val classFiles =
+                Files.walk(fileSystem.getPath("/")).use { paths ->
+                    paths
+                        .filter { path -> !Files.isDirectory(path) }
+                        .map(::getClassBytes)
+                        .filter { pair -> pair != null }
+                        .map { pair -> pair!! }
+                        .toList()
+                }
+            val hierarchy = ClassHierarchy(classFiles.map { it.second })
+            val transformed =
+                classFiles.map { pair ->
+                    transform(pair, hierarchy, replaceAndroidClasses)
+                }
+            transformed.forEach(::write)
         }
     }
 
@@ -129,10 +154,18 @@ object BytecodeEditor {
      *
      * @return [ByteArray] with modified bytecode
      */
-    private fun transform(pair: Pair<Path, ByteArray>): Pair<Path, ByteArray> {
+    private fun transform(
+        pair: Pair<Path, ByteArray>,
+        hierarchy: ClassHierarchy,
+        replaceAndroidClasses: Boolean,
+    ): Pair<Path, ByteArray> {
         // Read the class and prepare to modify it
         val cr = ClassReader(pair.second)
-        val cw = ClassWriter(cr, 0)
+        val cw = FrameComputingClassWriter(hierarchy)
+        if (!replaceAndroidClasses) {
+            cr.accept(cw, ClassReader.SKIP_FRAMES)
+            return pair.first to cw.toByteArray()
+        }
         // Modify the class
         cr.accept(
             object : ClassVisitor(Opcodes.ASM5, cw) {
@@ -259,9 +292,178 @@ object BytecodeEditor {
                     }
                 }
             },
-            0,
+            ClassReader.SKIP_FRAMES,
         )
         return pair.first to cw.toByteArray()
+    }
+
+    private data class ClassInfo(
+        val superName: String?,
+        val interfaces: List<String>,
+        val isInterface: Boolean,
+    )
+
+    private class FrameComputingClassWriter(
+        private val hierarchy: ClassHierarchy,
+    ) : ClassWriter(COMPUTE_FRAMES or COMPUTE_MAXS) {
+        override fun getCommonSuperClass(
+            type1: String,
+            type2: String,
+        ): String = hierarchy.commonSuperClass(type1, type2)
+    }
+
+    private class ClassHierarchy(classBytes: List<ByteArray>) {
+        private val classInfo = mutableMapOf<String, ClassInfo>()
+        private val missingClasses = mutableSetOf<String>()
+
+        init {
+            classBytes.forEach { bytes ->
+                val reader = ClassReader(bytes)
+                classInfo[reader.className] = reader.toClassInfo()
+            }
+        }
+
+        fun commonSuperClass(
+            type1: String,
+            type2: String,
+        ): String {
+            if (type1 == type2) return type1
+            if (isAssignableFrom(type1, type2)) return type1
+            if (isAssignableFrom(type2, type1)) return type2
+
+            if (type1.startsWith("[") && type2.startsWith("[")) {
+                val component1 = type1.substring(1)
+                val component2 = type2.substring(1)
+                if (!isPrimitiveDescriptor(component1) && !isPrimitiveDescriptor(component2)) {
+                    val commonComponent =
+                        commonSuperClass(
+                            descriptorToType(component1),
+                            descriptorToType(component2),
+                        )
+                    return "[${typeToDescriptor(commonComponent)}"
+                }
+            }
+
+            if (type1.startsWith("[") || type2.startsWith("[")) {
+                return OBJECT_CLASS
+            }
+
+            val firstInfo = resolve(type1)
+            val secondInfo = resolve(type2)
+            if (firstInfo?.isInterface == true || secondInfo?.isInterface == true) {
+                return OBJECT_CLASS
+            }
+
+            var candidate = firstInfo?.superName
+            while (candidate != null) {
+                if (isAssignableFrom(candidate, type2)) {
+                    return candidate
+                }
+                candidate = resolve(candidate)?.superName
+            }
+            return OBJECT_CLASS
+        }
+
+        private fun isAssignableFrom(
+            target: String,
+            source: String,
+        ): Boolean = isAssignableFrom(target, source, mutableSetOf())
+
+        private fun isAssignableFrom(
+            target: String,
+            source: String,
+            visited: MutableSet<String>,
+        ): Boolean {
+            if (target == source) return true
+            if (source.startsWith("[")) {
+                if (target == OBJECT_CLASS || target == CLONEABLE_CLASS || target == SERIALIZABLE_CLASS) {
+                    return true
+                }
+                if (!target.startsWith("[")) return false
+                val targetComponent = target.substring(1)
+                val sourceComponent = source.substring(1)
+                if (isPrimitiveDescriptor(targetComponent) || isPrimitiveDescriptor(sourceComponent)) {
+                    return targetComponent == sourceComponent
+                }
+                return isAssignableFrom(
+                    descriptorToType(targetComponent),
+                    descriptorToType(sourceComponent),
+                    visited,
+                )
+            }
+            if (target.startsWith("[")) return false
+            if (target == OBJECT_CLASS) return true
+            if (!visited.add(source)) return false
+
+            val sourceInfo = resolve(source) ?: return false
+            return sourceInfo.superName?.let { isAssignableFrom(target, it, visited) } == true ||
+                sourceInfo.interfaces.any { isAssignableFrom(target, it, visited) }
+        }
+
+        private fun resolve(name: String): ClassInfo? {
+            classInfo[name]?.let { return it }
+            if (name in missingClasses || name.startsWith("[")) return null
+
+            val resourceName = "$name.class"
+            val stream =
+                BytecodeEditor::class.java.classLoader?.getResourceAsStream(resourceName)
+                    ?: ClassLoader.getSystemResourceAsStream(resourceName)
+            val resolved =
+                stream?.use { input ->
+                    runCatching { ClassReader(input).toClassInfo() }.getOrNull()
+                } ?: resolveRuntimeClass(name)
+            if (resolved == null) {
+                missingClasses += name
+            } else {
+                classInfo[name] = resolved
+            }
+            return resolved
+        }
+
+        private fun resolveRuntimeClass(name: String): ClassInfo? =
+            runCatching {
+                val clazz =
+                    Class.forName(
+                        name.replace('/', '.'),
+                        false,
+                        BytecodeEditor::class.java.classLoader,
+                    )
+                ClassInfo(
+                    superName = clazz.superclass?.name?.replace('.', '/'),
+                    interfaces = clazz.interfaces.map { it.name.replace('.', '/') },
+                    isInterface = clazz.isInterface,
+                )
+            }.getOrNull()
+
+        private fun ClassReader.toClassInfo(): ClassInfo =
+            ClassInfo(
+                superName = superName,
+                interfaces = interfaces.toList(),
+                isInterface = access and Opcodes.ACC_INTERFACE != 0,
+            )
+
+        private fun isPrimitiveDescriptor(descriptor: String): Boolean =
+            descriptor.length == 1 && descriptor[0] in "ZCBSIFJDV"
+
+        private fun descriptorToType(descriptor: String): String =
+            if (descriptor.startsWith("L")) {
+                Type.getType(descriptor).internalName
+            } else {
+                descriptor
+            }
+
+        private fun typeToDescriptor(type: String): String =
+            if (type.startsWith("[")) {
+                type
+            } else {
+                "L$type;"
+            }
+
+        private companion object {
+            const val OBJECT_CLASS = "java/lang/Object"
+            const val CLONEABLE_CLASS = "java/lang/Cloneable"
+            const val SERIALIZABLE_CLASS = "java/io/Serializable"
+        }
     }
 
     private fun write(pair: Pair<Path, ByteArray>) {

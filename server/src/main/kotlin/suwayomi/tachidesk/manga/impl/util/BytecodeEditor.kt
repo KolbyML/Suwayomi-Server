@@ -16,6 +16,12 @@ import org.objectweb.asm.Handle
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
+import org.objectweb.asm.tree.AbstractInsnNode
+import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.FieldInsnNode
+import org.objectweb.asm.tree.MethodInsnNode
+import org.objectweb.asm.tree.TypeInsnNode
+import org.objectweb.asm.tree.VarInsnNode
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
@@ -58,13 +64,202 @@ object BytecodeEditor {
                         .map { pair -> pair!! }
                         .toList()
                 }
-            val hierarchy = ClassHierarchy(classFiles.map { it.second })
+            val repairedClassFiles = repairOptimizedEmptyConstructors(classFiles)
+            val hierarchy = ClassHierarchy(repairedClassFiles.map { it.second })
             val transformed =
-                classFiles.map { pair ->
+                repairedClassFiles.map { pair ->
                     transform(pair, hierarchy, replaceAndroidClasses)
                 }
             transformed.forEach(::write)
         }
+    }
+
+    /**
+     * Repair a constructor optimization emitted by recent R8 versions which dex2jar cannot
+     * represent correctly on the JVM.
+     *
+     * R8 may remove a trivial no-argument constructor and leave DEX which allocates the real
+     * class before directly invoking Object.<init>. dex2jar loses the allocation type in that
+     * shape and emits `new java/lang/Object`, even when the value is immediately stored in a
+     * field of the original class. Android accepts the DEX, but the JVM rejects the converted
+     * class with VerifyError. Recover the type from the first typed consumer and restore the
+     * empty constructor before stack-map frames are rebuilt.
+     */
+    private fun repairOptimizedEmptyConstructors(
+        classFiles: List<Pair<Path, ByteArray>>,
+    ): List<Pair<Path, ByteArray>> {
+        val parsed =
+            classFiles.map { pair ->
+                val node = ClassNode(Opcodes.ASM9)
+                ClassReader(pair.second).accept(node, 0)
+                pair.first to node
+            }
+        val repairableTypes =
+            parsed
+                .map { it.second }
+                .filter { node ->
+                    node.superName == OBJECT_CLASS &&
+                        node.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ANNOTATION) == 0 &&
+                        node.methods.none { method -> method.name == "<init>" }
+                }.associateBy { node -> node.name }
+        if (repairableTypes.isEmpty()) {
+            return classFiles
+        }
+
+        val repairedTypes = mutableSetOf<String>()
+        var allocationCount = 0
+        parsed.forEach { (_, node) ->
+            node.methods.forEach { method ->
+                method.instructions.toArray().forEach { instruction ->
+                    val allocation = instruction as? TypeInsnNode ?: return@forEach
+                    if (allocation.opcode != Opcodes.NEW || allocation.desc != OBJECT_CLASS) {
+                        return@forEach
+                    }
+                    val duplicate = allocation.nextExecutable() ?: return@forEach
+                    val constructor = duplicate.nextExecutable() as? MethodInsnNode ?: return@forEach
+                    if (
+                        duplicate.opcode != Opcodes.DUP ||
+                        constructor.opcode != Opcodes.INVOKESPECIAL ||
+                        constructor.owner != OBJECT_CLASS ||
+                        constructor.name != "<init>" ||
+                        constructor.desc != "()V"
+                    ) {
+                        return@forEach
+                    }
+
+                    val repairedType = inferAllocationType(constructor, repairableTypes.keys) ?: return@forEach
+                    allocation.desc = repairedType
+                    constructor.owner = repairedType
+                    repairedTypes += repairedType
+                    allocationCount += 1
+                }
+            }
+        }
+
+        repairedTypes.forEach { type ->
+            val node = repairableTypes.getValue(type)
+            node
+                .visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+                .apply {
+                    visitCode()
+                    visitVarInsn(Opcodes.ALOAD, 0)
+                    visitMethodInsn(Opcodes.INVOKESPECIAL, OBJECT_CLASS, "<init>", "()V", false)
+                    visitInsn(Opcodes.RETURN)
+                    visitMaxs(1, 1)
+                    visitEnd()
+                }
+        }
+
+        if (allocationCount > 0) {
+            logger.info {
+                "Repaired $allocationCount optimized empty-constructor allocation(s) across " +
+                    "${repairedTypes.size} extension class(es)"
+            }
+        }
+
+        return parsed.map { (path, node) ->
+            val writer = ClassWriter(0)
+            node.accept(writer)
+            path to writer.toByteArray()
+        }
+    }
+
+    private fun inferAllocationType(
+        constructor: MethodInsnNode,
+        repairableTypes: Set<String>,
+    ): String? {
+        val consumer = constructor.nextExecutable() ?: return null
+        directConsumerType(consumer, repairableTypes)?.let { return it }
+
+        val store = consumer as? VarInsnNode ?: return null
+        if (store.opcode != Opcodes.ASTORE) return null
+
+        val candidates = mutableSetOf<String>()
+        var current = store.nextExecutable()
+        while (current != null) {
+            if (current is VarInsnNode && current.opcode == Opcodes.ASTORE && current.`var` == store.`var`) {
+                break
+            }
+            if (current is VarInsnNode && current.opcode == Opcodes.ALOAD && current.`var` == store.`var`) {
+                findTypedLocalConsumer(current, repairableTypes)?.let(candidates::add)
+            }
+            current = current.nextExecutable()
+        }
+        return candidates.singleOrNull()
+    }
+
+    private fun directConsumerType(
+        instruction: AbstractInsnNode,
+        repairableTypes: Set<String>,
+    ): String? =
+        when (instruction) {
+            is FieldInsnNode ->
+                if (instruction.opcode == Opcodes.PUTSTATIC) {
+                    descriptorClassName(instruction.desc)?.takeIf(repairableTypes::contains)
+                } else {
+                    null
+                }
+            is TypeInsnNode ->
+                if (instruction.opcode == Opcodes.CHECKCAST) {
+                    instruction.desc.takeIf(repairableTypes::contains)
+                } else {
+                    null
+                }
+            else -> null
+        }
+
+    private fun findTypedLocalConsumer(
+        load: VarInsnNode,
+        repairableTypes: Set<String>,
+    ): String? {
+        var current = load.nextExecutable()
+        var remaining = LOCAL_CONSUMER_SCAN_LIMIT
+        while (current != null && remaining-- > 0) {
+            when (current) {
+                is FieldInsnNode -> {
+                    if (current.opcode == Opcodes.PUTSTATIC) {
+                        return descriptorClassName(current.desc)?.takeIf(repairableTypes::contains)
+                    }
+                    if (current.opcode == Opcodes.GETFIELD || current.opcode == Opcodes.PUTFIELD) {
+                        return current.owner.takeIf(repairableTypes::contains)
+                    }
+                    return null
+                }
+                is MethodInsnNode -> {
+                    if (current.opcode != Opcodes.INVOKESTATIC && current.owner in repairableTypes) {
+                        return current.owner
+                    }
+                    return null
+                }
+                is TypeInsnNode -> {
+                    if (current.opcode == Opcodes.CHECKCAST && current.desc in repairableTypes) {
+                        return current.desc
+                    }
+                }
+            }
+            if (
+                current.opcode in Opcodes.IRETURN..Opcodes.RETURN ||
+                current.opcode == Opcodes.ATHROW ||
+                current.opcode == Opcodes.GOTO ||
+                current.opcode == Opcodes.TABLESWITCH ||
+                current.opcode == Opcodes.LOOKUPSWITCH
+            ) {
+                return null
+            }
+            current = current.nextExecutable()
+        }
+        return null
+    }
+
+    private fun descriptorClassName(descriptor: String): String? =
+        Type.getType(descriptor).takeIf { type -> type.sort == Type.OBJECT }?.internalName
+
+    private fun AbstractInsnNode.nextExecutable(): AbstractInsnNode? {
+        var current = next
+        while (current != null && current.opcode < 0) {
+            current = current.next
+        }
+        return current
     }
 
     /**
@@ -109,6 +304,8 @@ object BytecodeEditor {
      * The path where replacement classes will reside
      */
     private const val REPLACEMENT_PATH = "xyz/nulldev/androidcompat/replace"
+    private const val OBJECT_CLASS = "java/lang/Object"
+    private const val LOCAL_CONSUMER_SCAN_LIMIT = 16
 
     /**
      * List of classes that will be replaced

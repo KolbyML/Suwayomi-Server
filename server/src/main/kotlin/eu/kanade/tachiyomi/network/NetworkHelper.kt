@@ -9,7 +9,6 @@ package eu.kanade.tachiyomi.network
 
 import android.content.Context
 import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
-import eu.kanade.tachiyomi.network.interceptor.IgnoreGzipInterceptor
 import eu.kanade.tachiyomi.network.interceptor.UncaughtExceptionInterceptor
 import eu.kanade.tachiyomi.network.interceptor.UserAgentInterceptor
 import eu.kanade.tachiyomi.network.MemoryCookieStore
@@ -25,7 +24,6 @@ import kotlinx.coroutines.flow.onEach
 import okhttp3.Cache
 import okhttp3.CookieJar
 import okhttp3.OkHttpClient
-import okhttp3.brotli.BrotliInterceptor
 import okhttp3.logging.HttpLoggingInterceptor
 import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource
 import suwayomi.tachidesk.server.RuntimeMode
@@ -150,8 +148,6 @@ class NetworkHelper(
                     ),
                 ).addInterceptor(UncaughtExceptionInterceptor())
                 .addInterceptor(UserAgentInterceptor(::defaultUserAgentProvider))
-                .addNetworkInterceptor(IgnoreGzipInterceptor())
-                .addNetworkInterceptor(BrotliInterceptor)
 
         val networkLogger =
             object : HttpLoggingInterceptor.Logger {
@@ -182,6 +178,8 @@ class NetworkHelper(
     val client: OkHttpClient
         get() = sharedClient
 
+    @Deprecated("The regular client handles Cloudflare by default")
+    @Suppress("UNUSED")
     val cloudflareClient: OkHttpClient
         get() = sharedClient
 }

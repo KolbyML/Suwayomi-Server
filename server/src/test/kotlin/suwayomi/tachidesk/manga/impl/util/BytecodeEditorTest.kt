@@ -68,6 +68,32 @@ class BytecodeEditorTest {
         }
     }
 
+    @Test
+    fun `repairs optimized empty constructors lost by dex2jar`() {
+        val jarPath = tempDir.resolve("optimized-empty-constructors.jar")
+        ZipOutputStream(Files.newOutputStream(jarPath)).use { zip ->
+            zip.putNextEntry(ZipEntry("test/OptimizedFactory.class"))
+            zip.write(optimizedFactoryClass())
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("test/OptimizedTag.class"))
+            zip.write(optimizedTagClass())
+            zip.closeEntry()
+        }
+
+        BytecodeEditor.fixAndroidClasses(jarPath)
+
+        URLClassLoader(arrayOf(jarPath.toUri().toURL()), javaClass.classLoader).use { loader ->
+            val factoryClass = loader.loadClass("test.OptimizedFactory")
+            val singleton = factoryClass.getField("singleton").get(null)
+            assertTrue(factoryClass.isInstance(singleton))
+
+            val tagClass = loader.loadClass("test.OptimizedTag")
+            val tag = factoryClass.getMethod("makeTag").invoke(null)
+            assertTrue(tagClass.isInstance(tag))
+            assertTrue(!tagClass.getField("flag").getBoolean(tag))
+        }
+    }
+
     private fun frameLessClass(): ByteArray {
         val writer = ClassWriter(0)
         writer.visit(
@@ -99,6 +125,83 @@ class BytecodeEditorTest {
                 visitMaxs(1, 1)
                 visitEnd()
             }
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    private fun optimizedFactoryClass(): ByteArray {
+        val writer = ClassWriter(0)
+        writer.visit(
+            Opcodes.V1_6,
+            Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL,
+            "test/OptimizedFactory",
+            null,
+            "java/lang/Object",
+            null,
+        )
+        writer
+            .visitField(
+                Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL,
+                "singleton",
+                "Ltest/OptimizedFactory;",
+                null,
+                null,
+            ).visitEnd()
+
+        writer
+            .visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
+            .apply {
+                visitCode()
+                visitTypeInsn(Opcodes.NEW, "java/lang/Object")
+                visitInsn(Opcodes.DUP)
+                visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+                visitFieldInsn(
+                    Opcodes.PUTSTATIC,
+                    "test/OptimizedFactory",
+                    "singleton",
+                    "Ltest/OptimizedFactory;",
+                )
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(2, 0)
+                visitEnd()
+            }
+
+        writer
+            .visitMethod(
+                Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC,
+                "makeTag",
+                "()Ltest/OptimizedTag;",
+                null,
+                null,
+            ).apply {
+                visitCode()
+                visitTypeInsn(Opcodes.NEW, "java/lang/Object")
+                visitInsn(Opcodes.DUP)
+                visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+                visitVarInsn(Opcodes.ASTORE, 0)
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitInsn(Opcodes.ICONST_0)
+                visitFieldInsn(Opcodes.PUTFIELD, "test/OptimizedTag", "flag", "Z")
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitInsn(Opcodes.ARETURN)
+                visitMaxs(2, 1)
+                visitEnd()
+            }
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    private fun optimizedTagClass(): ByteArray {
+        val writer = ClassWriter(0)
+        writer.visit(
+            Opcodes.V1_6,
+            Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL,
+            "test/OptimizedTag",
+            null,
+            "java/lang/Object",
+            null,
+        )
+        writer.visitField(Opcodes.ACC_PUBLIC, "flag", "Z", null, null).visitEnd()
         writer.visitEnd()
         return writer.toByteArray()
     }

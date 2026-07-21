@@ -44,12 +44,14 @@ import suwayomi.tachidesk.manga.impl.util.storage.ImageResponse.getImageResponse
 import suwayomi.tachidesk.manga.impl.util.storage.ImageResponse.saveImage
 import suwayomi.tachidesk.manga.model.table.ExtensionTable
 import suwayomi.tachidesk.manga.model.table.SourceTable
-import suwayomi.tachidesk.server.RuntimeMode
 import suwayomi.tachidesk.server.ApplicationDirs
+import suwayomi.tachidesk.server.RuntimeMode
 import uy.kohesive.injekt.injectLazy
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.nio.file.Files
+import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -148,13 +150,10 @@ object Extension {
 
         val dirPathWithoutType = "${applicationDirs.extensionsRoot}/$fileNameWithoutType"
         val jarFilePath = "$dirPathWithoutType.jar"
+        val stagedJarFilePath = "$dirPathWithoutType.installing-${UUID.randomUUID()}.jar"
 
         val packageInfo = getPackageInfo(apkFilePath)
         val pkgName = packageInfo.packageName
-        if (isInstalled && forceReinstall) {
-            uninstallExtension(pkgName, apkName)
-        }
-
         if (!isInstalled || forceReinstall) {
             if (!packageInfo.reqFeatures.orEmpty().any { it.name == EXTENSION_FEATURE }) {
                 throw Exception("This apk is not a Tachiyomi extension")
@@ -185,8 +184,25 @@ object Extension {
 
             logger.debug { "Main class for extension is $className" }
 
-            dex2jar(apkFilePath, jarFilePath, fileNameWithoutType)
-            extractAssetsFromApk(apkFilePath, jarFilePath)
+            try {
+                dex2jar(apkFilePath, stagedJarFilePath, fileNameWithoutType)
+                extractAssetsFromApk(apkFilePath, stagedJarFilePath)
+                PackageTools.verifyConvertedJar(Path(stagedJarFilePath))
+
+                // Instantiate the staged main class before changing an existing installation.
+                // A verifier/linkage/constructor failure therefore leaves the old JAR and DB rows intact.
+                loadExtensionSources(stagedJarFilePath, className)
+                PackageTools.clearJarLoader(stagedJarFilePath)
+
+                if (isInstalled && forceReinstall) {
+                    uninstallExtension(pkgName, apkName)
+                }
+                PackageTools.moveAtomically(Path(stagedJarFilePath), Path(jarFilePath))
+            } catch (error: Throwable) {
+                PackageTools.clearJarLoader(stagedJarFilePath)
+                Files.deleteIfExists(Path(stagedJarFilePath))
+                throw error
+            }
             extractAndCacheApkIcon(apkFilePath, apkName)
 
             // clean up
@@ -475,8 +491,7 @@ object Extension {
         }
     }
 
-    private fun String.hasHttpScheme(): Boolean =
-        startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+    private fun String.hasHttpScheme(): Boolean = startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
 
     private fun findLocalExtensionApk(pkgName: String): File? {
         val root = File(applicationDirs.extensionsRoot)

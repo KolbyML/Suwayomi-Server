@@ -61,6 +61,9 @@ dependencies {
 
     // asm for ByteCodeEditor(fixing SimpleDateFormat) (must match Dex2Jar version)
     implementation(libs.asm)
+    implementation(libs.asm.analysis)
+    implementation(libs.asm.tree)
+    implementation(libs.asm.util)
 
     // Disk & File
     implementation(libs.cache4k)
@@ -95,11 +98,12 @@ dependencies {
 
     // Native QuickJS runtime for evaluating extension JavaScript
     implementation(libs.quickjs.jvm)
-
 }
 
 fun overlayPaths(propertyName: String): List<String> =
-    providers.gradleProperty(propertyName).orNull
+    providers
+        .gradleProperty(propertyName)
+        .orNull
         ?.split(File.pathSeparator, ",")
         ?.map { it.trim() }
         ?.filter { it.isNotEmpty() }

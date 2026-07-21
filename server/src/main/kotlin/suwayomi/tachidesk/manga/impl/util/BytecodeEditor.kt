@@ -16,16 +16,18 @@ import org.objectweb.asm.Handle
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
-import org.objectweb.asm.tree.AbstractInsnNode
 import org.objectweb.asm.tree.ClassNode
-import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
-import org.objectweb.asm.tree.TypeInsnNode
-import org.objectweb.asm.tree.VarInsnNode
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+
+data class ForwardingConstructor(
+    val allocatedType: String,
+    val invokedOwner: String,
+    val descriptor: String,
+)
 
 object BytecodeEditor {
     private val logger = KotlinLogging.logger {}
@@ -35,8 +37,15 @@ object BytecodeEditor {
      *
      * @param jarFile The JarFile to replace class references in
      */
-    fun fixAndroidClasses(jarFile: Path) {
-        rewriteClasses(jarFile, replaceAndroidClasses = true)
+    fun fixAndroidClasses(
+        jarFile: Path,
+        forwardingConstructors: Set<ForwardingConstructor> = emptySet(),
+    ) {
+        rewriteClasses(
+            jarFile,
+            replaceAndroidClasses = true,
+            forwardingConstructors = forwardingConstructors,
+        )
     }
 
     /**
@@ -47,12 +56,17 @@ object BytecodeEditor {
      * repair existing jars without applying the Android class substitutions a second time.
      */
     fun repairStackMapFrames(jarFile: Path) {
-        rewriteClasses(jarFile, replaceAndroidClasses = false)
+        rewriteClasses(
+            jarFile,
+            replaceAndroidClasses = false,
+            forwardingConstructors = emptySet(),
+        )
     }
 
     private fun rewriteClasses(
         jarFile: Path,
         replaceAndroidClasses: Boolean,
+        forwardingConstructors: Set<ForwardingConstructor>,
     ) {
         FileSystems.newFileSystem(jarFile, null as ClassLoader?)?.use { fileSystem ->
             val classFiles =
@@ -64,7 +78,7 @@ object BytecodeEditor {
                         .map { pair -> pair!! }
                         .toList()
                 }
-            val repairedClassFiles = repairOptimizedEmptyConstructors(classFiles)
+            val repairedClassFiles = repairOptimizedConstructors(classFiles, forwardingConstructors)
             val hierarchy = ClassHierarchy(repairedClassFiles.map { it.second })
             val transformed =
                 repairedClassFiles.map { pair ->
@@ -78,15 +92,19 @@ object BytecodeEditor {
      * Repair a constructor optimization emitted by recent R8 versions which dex2jar cannot
      * represent correctly on the JVM.
      *
-     * R8 may remove a trivial no-argument constructor and leave DEX which allocates the real
-     * class before directly invoking Object.<init>. dex2jar loses the allocation type in that
-     * shape and emits `new java/lang/Object`, even when the value is immediately stored in a
-     * field of the original class. Android accepts the DEX, but the JVM rejects the converted
-     * class with VerifyError. Recover the type from the first typed consumer and restore the
-     * empty constructor before stack-map frames are rebuilt.
+     * R8 may remove a forwarding constructor and leave valid DEX which allocates a concrete class
+     * before directly invoking an ancestor constructor. [DexConstructorNormalizer] preserves that
+     * allocation/constructor relationship by DEX register identity before dex2jar lowers it. The
+     * JVM still requires each class in the hierarchy to declare and invoke a direct-super
+     * constructor, so recreate exactly those missing forwarding constructors here.
+     *
+     * R8 can also remove a superclass constructor and have a subclass call a more distant
+     * ancestor directly. DEX permits that optimized form, but JVM constructors must invoke
+     * their direct superclass. Recreate every eliminated forwarding constructor in the path.
      */
-    private fun repairOptimizedEmptyConstructors(
+    private fun repairOptimizedConstructors(
         classFiles: List<Pair<Path, ByteArray>>,
+        forwardingConstructors: Set<ForwardingConstructor>,
     ): List<Pair<Path, ByteArray>> {
         val parsed =
             classFiles.map { pair ->
@@ -94,66 +112,89 @@ object BytecodeEditor {
                 ClassReader(pair.second).accept(node, 0)
                 pair.first to node
             }
-        val repairableTypes =
+        val classesByName = parsed.associate { (_, node) -> node.name to node }
+        val concreteTypes =
             parsed
                 .map { it.second }
                 .filter { node ->
-                    node.superName == OBJECT_CLASS &&
-                        node.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ANNOTATION) == 0 &&
-                        node.methods.none { method -> method.name == "<init>" }
+                    node.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ANNOTATION) == 0
                 }.associateBy { node -> node.name }
-        if (repairableTypes.isEmpty()) {
+        if (concreteTypes.isEmpty()) {
             return classFiles
         }
 
-        val repairedTypes = mutableSetOf<String>()
-        var allocationCount = 0
-        parsed.forEach { (_, node) ->
-            node.methods.forEach { method ->
-                method.instructions.toArray().forEach { instruction ->
-                    val allocation = instruction as? TypeInsnNode ?: return@forEach
-                    if (allocation.opcode != Opcodes.NEW || allocation.desc != OBJECT_CLASS) {
-                        return@forEach
-                    }
-                    val duplicate = allocation.nextExecutable() ?: return@forEach
-                    val constructor = duplicate.nextExecutable() as? MethodInsnNode ?: return@forEach
-                    if (
-                        duplicate.opcode != Opcodes.DUP ||
-                        constructor.opcode != Opcodes.INVOKESPECIAL ||
-                        constructor.owner != OBJECT_CLASS ||
-                        constructor.name != "<init>" ||
-                        constructor.desc != "()V"
-                    ) {
-                        return@forEach
-                    }
-
-                    val repairedType = inferAllocationType(constructor, repairableTypes.keys) ?: return@forEach
-                    allocation.desc = repairedType
-                    constructor.owner = repairedType
-                    repairedTypes += repairedType
-                    allocationCount += 1
+        val repairedConstructors = mutableMapOf<String, MutableSet<String>>()
+        forwardingConstructors.forEach { relationship ->
+            val path =
+                constructorPath(
+                    allocatedType = relationship.allocatedType,
+                    invokedOwner = relationship.invokedOwner,
+                    classesByName = classesByName,
+                ) ?: throw ExtensionCompatibilityException(
+                    "${relationship.allocatedType} is not a subclass of ${relationship.invokedOwner}",
+                )
+            path.forEach { type ->
+                val node =
+                    concreteTypes[type]
+                        ?: throw ExtensionCompatibilityException(
+                            "missing converted class $type",
+                        )
+                if (node.methods.none { it.name == "<init>" && it.desc == relationship.descriptor }) {
+                    repairedConstructors.getOrPut(type, ::mutableSetOf) += relationship.descriptor
                 }
             }
         }
 
-        repairedTypes.forEach { type ->
-            val node = repairableTypes.getValue(type)
-            node
-                .visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
-                .apply {
-                    visitCode()
-                    visitVarInsn(Opcodes.ALOAD, 0)
-                    visitMethodInsn(Opcodes.INVOKESPECIAL, OBJECT_CLASS, "<init>", "()V", false)
-                    visitInsn(Opcodes.RETURN)
-                    visitMaxs(1, 1)
-                    visitEnd()
+        var superclassCallCount = 0
+        parsed.forEach { (_, node) ->
+            node.methods
+                .filter { method -> method.name == "<init>" }
+                .forEach methodLoop@{ method ->
+                    val constructorCall =
+                        method.instructions
+                            .toArray()
+                            .filterIsInstance<MethodInsnNode>()
+                            .firstOrNull { instruction ->
+                                instruction.opcode == Opcodes.INVOKESPECIAL &&
+                                    instruction.name == "<init>" &&
+                                    (
+                                        instruction.owner == node.name ||
+                                            isAncestor(node.superName, instruction.owner, classesByName)
+                                    )
+                            } ?: return@methodLoop
+                    if (constructorCall.owner == node.name || constructorCall.owner == node.superName) {
+                        return@methodLoop
+                    }
+
+                    val skippedTypes =
+                        constructorPath(
+                            allocatedType = node.superName ?: return@methodLoop,
+                            invokedOwner = constructorCall.owner,
+                            classesByName = classesByName,
+                        ) ?: return@methodLoop
+                    constructorCall.owner = node.superName
+                    skippedTypes.forEach { skippedType ->
+                        val skippedNode = concreteTypes[skippedType] ?: return@forEach
+                        if (skippedNode.methods.none { it.name == "<init>" && it.desc == constructorCall.desc }) {
+                            repairedConstructors.getOrPut(skippedType, ::mutableSetOf) += constructorCall.desc
+                        }
+                    }
+                    superclassCallCount += 1
                 }
         }
 
-        if (allocationCount > 0) {
+        repairedConstructors.forEach { (type, descriptors) ->
+            val node = concreteTypes.getValue(type)
+            descriptors.forEach { descriptor ->
+                addForwardingConstructor(node, descriptor)
+            }
+        }
+
+        if (forwardingConstructors.isNotEmpty() || superclassCallCount > 0) {
             logger.info {
-                "Repaired $allocationCount optimized empty-constructor allocation(s) across " +
-                    "${repairedTypes.size} extension class(es)"
+                "Preserved ${forwardingConstructors.size} DEX constructor relationship(s) and repaired " +
+                    "$superclassCallCount skipped superclass constructor call(s) across " +
+                    "${repairedConstructors.size} extension class(es)"
             }
         }
 
@@ -164,102 +205,58 @@ object BytecodeEditor {
         }
     }
 
-    private fun inferAllocationType(
-        constructor: MethodInsnNode,
-        repairableTypes: Set<String>,
-    ): String? {
-        val consumer = constructor.nextExecutable() ?: return null
-        directConsumerType(consumer, repairableTypes)?.let { return it }
-
-        val store = consumer as? VarInsnNode ?: return null
-        if (store.opcode != Opcodes.ASTORE) return null
-
-        val candidates = mutableSetOf<String>()
-        var current = store.nextExecutable()
-        while (current != null) {
-            if (current is VarInsnNode && current.opcode == Opcodes.ASTORE && current.`var` == store.`var`) {
-                break
-            }
-            if (current is VarInsnNode && current.opcode == Opcodes.ALOAD && current.`var` == store.`var`) {
-                findTypedLocalConsumer(current, repairableTypes)?.let(candidates::add)
-            }
-            current = current.nextExecutable()
+    private fun isAncestor(
+        directSuperclass: String?,
+        possibleAncestor: String,
+        classesByName: Map<String, ClassNode>,
+    ): Boolean {
+        var current = directSuperclass
+        val visited = mutableSetOf<String>()
+        while (current != null && visited.add(current)) {
+            if (current == possibleAncestor) return true
+            current = classesByName[current]?.superName
         }
-        return candidates.singleOrNull()
+        return false
     }
 
-    private fun directConsumerType(
-        instruction: AbstractInsnNode,
-        repairableTypes: Set<String>,
-    ): String? =
-        when (instruction) {
-            is FieldInsnNode ->
-                if (instruction.opcode == Opcodes.PUTSTATIC) {
-                    descriptorClassName(instruction.desc)?.takeIf(repairableTypes::contains)
-                } else {
-                    null
-                }
-            is TypeInsnNode ->
-                if (instruction.opcode == Opcodes.CHECKCAST) {
-                    instruction.desc.takeIf(repairableTypes::contains)
-                } else {
-                    null
-                }
-            else -> null
+    private fun constructorPath(
+        allocatedType: String,
+        invokedOwner: String,
+        classesByName: Map<String, ClassNode>,
+    ): List<String>? {
+        val path = mutableListOf<String>()
+        val visited = mutableSetOf<String>()
+        var current: String? = allocatedType
+        while (current != invokedOwner) {
+            if (current == null || !visited.add(current)) return null
+            val node = classesByName[current] ?: return null
+            path += current
+            current = node.superName
         }
-
-    private fun findTypedLocalConsumer(
-        load: VarInsnNode,
-        repairableTypes: Set<String>,
-    ): String? {
-        var current = load.nextExecutable()
-        var remaining = LOCAL_CONSUMER_SCAN_LIMIT
-        while (current != null && remaining-- > 0) {
-            when (current) {
-                is FieldInsnNode -> {
-                    if (current.opcode == Opcodes.PUTSTATIC) {
-                        return descriptorClassName(current.desc)?.takeIf(repairableTypes::contains)
-                    }
-                    if (current.opcode == Opcodes.GETFIELD || current.opcode == Opcodes.PUTFIELD) {
-                        return current.owner.takeIf(repairableTypes::contains)
-                    }
-                    return null
-                }
-                is MethodInsnNode -> {
-                    if (current.opcode != Opcodes.INVOKESTATIC && current.owner in repairableTypes) {
-                        return current.owner
-                    }
-                    return null
-                }
-                is TypeInsnNode -> {
-                    if (current.opcode == Opcodes.CHECKCAST && current.desc in repairableTypes) {
-                        return current.desc
-                    }
-                }
-            }
-            if (
-                current.opcode in Opcodes.IRETURN..Opcodes.RETURN ||
-                current.opcode == Opcodes.ATHROW ||
-                current.opcode == Opcodes.GOTO ||
-                current.opcode == Opcodes.TABLESWITCH ||
-                current.opcode == Opcodes.LOOKUPSWITCH
-            ) {
-                return null
-            }
-            current = current.nextExecutable()
-        }
-        return null
+        return path
     }
 
-    private fun descriptorClassName(descriptor: String): String? =
-        Type.getType(descriptor).takeIf { type -> type.sort == Type.OBJECT }?.internalName
-
-    private fun AbstractInsnNode.nextExecutable(): AbstractInsnNode? {
-        var current = next
-        while (current != null && current.opcode < 0) {
-            current = current.next
-        }
-        return current
+    private fun addForwardingConstructor(
+        node: ClassNode,
+        descriptor: String,
+    ) {
+        val argumentTypes = Type.getArgumentTypes(descriptor)
+        val argumentSlots = argumentTypes.sumOf(Type::getSize)
+        node
+            .visitMethod(Opcodes.ACC_PUBLIC, "<init>", descriptor, null, null)
+            .apply {
+                visitCode()
+                visitVarInsn(Opcodes.ALOAD, 0)
+                var localIndex = 1
+                argumentTypes.forEach { type ->
+                    visitVarInsn(type.getOpcode(Opcodes.ILOAD), localIndex)
+                    localIndex += type.size
+                }
+                visitMethodInsn(Opcodes.INVOKESPECIAL, node.superName, "<init>", descriptor, false)
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(1 + argumentSlots, 1 + argumentSlots)
+                visitEnd()
+            }
     }
 
     /**
@@ -304,8 +301,6 @@ object BytecodeEditor {
      * The path where replacement classes will reside
      */
     private const val REPLACEMENT_PATH = "xyz/nulldev/androidcompat/replace"
-    private const val OBJECT_CLASS = "java/lang/Object"
-    private const val LOCAL_CONSUMER_SCAN_LIMIT = 16
 
     /**
      * List of classes that will be replaced
@@ -509,7 +504,9 @@ object BytecodeEditor {
         ): String = hierarchy.commonSuperClass(type1, type2)
     }
 
-    private class ClassHierarchy(classBytes: List<ByteArray>) {
+    private class ClassHierarchy(
+        classBytes: List<ByteArray>,
+    ) {
         private val classInfo = mutableMapOf<String, ClassInfo>()
         private val missingClasses = mutableSetOf<String>()
 
@@ -639,8 +636,7 @@ object BytecodeEditor {
                 isInterface = access and Opcodes.ACC_INTERFACE != 0,
             )
 
-        private fun isPrimitiveDescriptor(descriptor: String): Boolean =
-            descriptor.length == 1 && descriptor[0] in "ZCBSIFJDV"
+        private fun isPrimitiveDescriptor(descriptor: String): Boolean = descriptor.length == 1 && descriptor[0] in "ZCBSIFJDV"
 
         private fun descriptorToType(descriptor: String): String =
             if (descriptor.startsWith("L")) {

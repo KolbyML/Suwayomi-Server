@@ -17,6 +17,8 @@ import eu.kanade.tachiyomi.util.lang.Hash
 import io.github.oshai.kotlinlogging.KotlinLogging
 import net.dongliu.apk.parser.ApkFile
 import net.dongliu.apk.parser.ApkParsers
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.util.CheckClassAdapter
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 import suwayomi.tachidesk.server.ApplicationDirs
@@ -24,11 +26,17 @@ import uy.kohesive.injekt.injectLazy
 import xyz.nulldev.androidcompat.pm.InstalledPackage.Companion.toList
 import xyz.nulldev.androidcompat.pm.toPackageInfo
 import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.net.URL
 import java.net.URLClassLoader
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.ZipFile
 import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.io.path.Path
 import kotlin.io.path.relativeTo
@@ -43,6 +51,7 @@ object PackageTools {
     const val METADATA_NSFW = "tachiyomi.extension.nsfw"
     const val LIB_VERSION_MIN = 1.3
     const val LIB_VERSION_MAX = 1.5
+    internal const val CONVERTER_VERSION = "dex-register-constructors-v1"
     private const val ANIME_METADATA_SOURCE_CLASS = "tachiyomi.animeextension.class"
     private const val ANIME_METADATA_SOURCE_FACTORY = "tachiyomi.animeextension.factory"
 
@@ -57,13 +66,55 @@ object PackageTools {
         // adopted from com.googlecode.dex2jar.tools.Dex2jarCmd.doCommandLine
         // source at: https://github.com/DexPatcher/dex2jar/tree/v2.1-20190905-lanchon/dex-tools/src/main/java/com/googlecode/dex2jar/tools/Dex2jarCmd.java
 
-        val jarFilePath = File(jarFile).toPath()
+        val sourceBytes = Files.readAllBytes(File(dexFile).toPath())
+        val destination = File(jarFile).toPath()
+        val cacheDir = Path(applicationDirs.extensionsRoot).resolve(".converted-jars")
+        val cacheFile = cacheDir.resolve(convertedJarCacheKey(sourceBytes))
+        val staged = destination.resolveSibling("${destination.fileName}.installing-${UUID.randomUUID()}")
+        val converting = cacheFile.resolveSibling("${cacheFile.fileName}.converting-${UUID.randomUUID()}")
+
         clearJarLoader(jarFile)
-        Files.deleteIfExists(jarFilePath)
-        val reader = MultiDexFileReader.open(Files.readAllBytes(File(dexFile).toPath()))
+        Files.createDirectories(cacheDir)
+        try {
+            if (Files.exists(cacheFile)) {
+                runCatching { verifyConvertedJar(cacheFile) }
+                    .onFailure {
+                        logger.warn(it) { "Discarding invalid converted extension cache $cacheFile" }
+                        Files.deleteIfExists(cacheFile)
+                    }
+            }
+
+            if (!Files.exists(cacheFile)) {
+                convertDexBytes(
+                    sourceBytes,
+                    converting,
+                    Path(applicationDirs.extensionsRoot).resolve("$fileNameWithoutType-error.txt"),
+                )
+                moveAtomically(converting, cacheFile)
+            }
+
+            Files.copy(cacheFile, staged, StandardCopyOption.REPLACE_EXISTING)
+            promoteVerifiedJar(staged, destination)
+        } catch (error: ExtensionCompatibilityException) {
+            throw error
+        } catch (error: Throwable) {
+            throw ExtensionCompatibilityException(error.message ?: error::class.java.simpleName, error)
+        } finally {
+            Files.deleteIfExists(staged)
+            Files.deleteIfExists(converting)
+            clearJarLoader(jarFile)
+        }
+    }
+
+    internal fun convertDexBytes(
+        sourceBytes: ByteArray,
+        destination: Path,
+        errorFile: Path,
+    ) {
+        val normalized = DexConstructorNormalizer.from(MultiDexFileReader.open(sourceBytes))
         val handler = BaksmaliBaseDexExceptionHandler()
         Dex2jar
-            .from(reader)
+            .from(normalized)
             .withExceptionHandler(handler)
             .reUseReg(false)
             .topoLogicalSort()
@@ -73,25 +124,94 @@ object PackageTools {
             .noCode(false)
             .skipExceptions(false)
             .dontSanitizeNames(true)
-            .to(jarFilePath)
+            .to(destination)
         if (handler.hasException()) {
-            val rootPath = Path(applicationDirs.extensionsRoot)
-            val errorFile: Path = rootPath.resolve("$fileNameWithoutType-error.txt")
-            logger.error {
-                """
-                Detail Error Information in File ${errorFile.relativeTo(rootPath)}
-                Please report this file to one of following link if possible (any one).
-                https://sourceforge.net/p/dex2jar/tickets/
-                https://bitbucket.org/pxb1988/dex2jar/issues
-                https://github.com/pxb1988/dex2jar/issues
-                dex2jar@googlegroups.com
-                """.trimIndent()
-            }
             handler.dump(errorFile, emptyArray<String>())
-        } else {
-            BytecodeEditor.fixAndroidClasses(jarFilePath)
+            throw ExtensionCompatibilityException(
+                "DEX conversion failed; details were written to ${errorFile.fileName}",
+            )
         }
-        clearJarLoader(jarFile)
+
+        BytecodeEditor.fixAndroidClasses(destination, normalized.forwardingConstructors)
+        verifyConvertedJar(destination)
+    }
+
+    internal fun convertedJarCacheKey(
+        apkBytes: ByteArray,
+        converterVersion: String = CONVERTER_VERSION,
+    ): String = "${Hash.sha256(apkBytes)}-$converterVersion.jar"
+
+    internal fun verifyConvertedJar(jarFile: Path) {
+        val classNames =
+            ZipFile(jarFile.toFile()).use { zip ->
+                zip
+                    .entries()
+                    .asSequence()
+                    .map { it.name }
+                    .filter { it.endsWith(".class") && !it.startsWith("META-INF/") && it != "module-info.class" }
+                    .map { it.removeSuffix(".class").replace('/', '.') }
+                    .sorted()
+                    .toList()
+            }
+        if (classNames.isEmpty()) throw ExtensionCompatibilityException("converted JAR contains no classes")
+
+        ChildFirstURLClassLoader(arrayOf(jarFile.toUri().toURL())).use { loader ->
+            ZipFile(jarFile.toFile()).use { zip ->
+                classNames.forEach { className ->
+                    try {
+                        val entry =
+                            zip.getEntry(className.replace('.', '/') + ".class")
+                                ?: throw ExtensionCompatibilityException("missing class entry for $className")
+                        val diagnostics = StringWriter()
+                        zip.getInputStream(entry).use { input ->
+                            CheckClassAdapter.verify(ClassReader(input), loader, false, PrintWriter(diagnostics))
+                        }
+                        if (diagnostics.toString().isNotBlank()) {
+                            val firstDiagnostic =
+                                diagnostics
+                                    .toString()
+                                    .lineSequence()
+                                    .first(String::isNotBlank)
+                            throw ExtensionCompatibilityException(
+                                "JVM verification failed for $className: $firstDiagnostic",
+                            )
+                        }
+                        loader.loadOwnClassAndResolve(className)
+                    } catch (error: ExtensionCompatibilityException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        throw ExtensionCompatibilityException(
+                            "JVM verification failed for $className: ${error.message ?: error::class.java.simpleName}",
+                            error,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    internal fun promoteVerifiedJar(
+        staged: Path,
+        destination: Path,
+    ) {
+        verifyConvertedJar(staged)
+        moveAtomically(staged, destination)
+    }
+
+    internal fun moveAtomically(
+        source: Path,
+        destination: Path,
+    ) {
+        try {
+            Files.move(
+                source,
+                destination,
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 
     /** A modified version of `xyz.nulldev.androidcompat.pm.InstalledPackage.info` */

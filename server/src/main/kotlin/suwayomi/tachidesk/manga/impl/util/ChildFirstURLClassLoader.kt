@@ -47,6 +47,14 @@ class ChildFirstURLClassLoader(
         return c
     }
 
+    /** Load this JAR's definition and force JVM linking/verification. */
+    @Synchronized
+    fun loadOwnClassAndResolve(name: String): Class<*> {
+        val loaded = findLoadedClass(name) ?: findClass(name)
+        resolveClass(loaded)
+        return loaded
+    }
+
     override fun getResource(name: String?): URL? =
         systemClassLoader?.getResource(name)
             ?: findResource(name)

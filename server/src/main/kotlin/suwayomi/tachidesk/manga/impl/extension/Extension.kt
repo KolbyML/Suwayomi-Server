@@ -30,8 +30,6 @@ import suwayomi.tachidesk.manga.impl.extension.ExtensionsList.extensionTableAsDa
 import suwayomi.tachidesk.manga.impl.extension.github.ExtensionGithubApi
 import suwayomi.tachidesk.manga.impl.util.PackageTools
 import suwayomi.tachidesk.manga.impl.util.PackageTools.EXTENSION_FEATURE
-import suwayomi.tachidesk.manga.impl.util.PackageTools.LIB_VERSION_MAX
-import suwayomi.tachidesk.manga.impl.util.PackageTools.LIB_VERSION_MIN
 import suwayomi.tachidesk.manga.impl.util.PackageTools.METADATA_NSFW
 import suwayomi.tachidesk.manga.impl.util.PackageTools.METADATA_SOURCE_CLASS
 import suwayomi.tachidesk.manga.impl.util.PackageTools.dex2jar
@@ -159,14 +157,7 @@ object Extension {
                 throw Exception("This apk is not a Tachiyomi extension")
             }
 
-            // Validate lib version
-            val libVersion = packageInfo.versionName.substringBeforeLast('.').toDouble()
-            if (libVersion < LIB_VERSION_MIN || libVersion > LIB_VERSION_MAX) {
-                throw Exception(
-                    "Lib version is $libVersion, while only versions " +
-                        "$LIB_VERSION_MIN to $LIB_VERSION_MAX are allowed",
-                )
-            }
+            PackageTools.requireSupportedExtensionLibVersion(packageInfo)
 
             // TODO: allow trusting keys
 //            val signatureHash = getSignatureHash(packageInfo)

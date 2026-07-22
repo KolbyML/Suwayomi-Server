@@ -26,8 +26,9 @@ import kotlinx.coroutines.future.future
 import org.eclipse.jetty.server.Connector
 import org.eclipse.jetty.server.ServerConnector
 import org.eclipse.jetty.util.thread.QueuedThreadPool
-import suwayomi.tachidesk.server.types.AuthMode
+import suwayomi.tachidesk.manga.impl.util.ExtensionCompatibilityException
 import suwayomi.tachidesk.server.plugin.ServerPluginRegistry
+import suwayomi.tachidesk.server.types.AuthMode
 import suwayomi.tachidesk.server.user.ForbiddenException
 import suwayomi.tachidesk.server.user.UnauthorizedException
 import suwayomi.tachidesk.server.user.UserType
@@ -193,6 +194,12 @@ object JavalinSetup {
             logger.error(e) { "IOException while handling the request" }
             ctx.status(500)
             ctx.result(e.message ?: "Internal Server Error")
+        }
+
+        app.exception(ExtensionCompatibilityException::class.java) { e, ctx ->
+            logger.warn(e) { "Incompatible extension package" }
+            ctx.status(HttpStatus.BAD_REQUEST)
+            ctx.result(e.message ?: "Extension package is incompatible")
         }
 
         app.exception(IllegalArgumentException::class.java) { e, ctx ->

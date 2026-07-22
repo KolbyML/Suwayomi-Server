@@ -14,8 +14,7 @@ import eu.kanade.tachiyomi.network.parseAs
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import suwayomi.tachidesk.manga.impl.util.PackageTools.LIB_VERSION_MAX
-import suwayomi.tachidesk.manga.impl.util.PackageTools.LIB_VERSION_MIN
+import suwayomi.tachidesk.manga.impl.util.PackageTools.SUPPORTED_LIB_VERSIONS
 import uy.kohesive.injekt.injectLazy
 
 object ExtensionGithubApi {
@@ -46,8 +45,19 @@ object ExtensionGithubApi {
 
     suspend fun findExtensions(
         repo: String,
-        libVersionMin: Double = LIB_VERSION_MIN,
-        libVersionMax: Double = LIB_VERSION_MAX,
+        supportedLibVersions: Set<Double> = SUPPORTED_LIB_VERSIONS,
+    ): List<OnlineExtension> = findExtensions(repo) { it in supportedLibVersions }
+
+    /** Retained for media ecosystems whose repositories use a contiguous version range. */
+    suspend fun findExtensions(
+        repo: String,
+        libVersionMin: Double,
+        libVersionMax: Double,
+    ): List<OnlineExtension> = findExtensions(repo) { it in libVersionMin..libVersionMax }
+
+    private suspend fun findExtensions(
+        repo: String,
+        isSupportedLibVersion: (Double) -> Boolean,
     ): List<OnlineExtension> {
         val response =
             client.newCall(GET(repo)).awaitSuccess()
@@ -55,7 +65,7 @@ object ExtensionGithubApi {
         return with(json) {
             response
                 .parseAs<List<ExtensionJsonObject>>()
-                .toExtensions(repo.substringBeforeLast('/') + '/', libVersionMin, libVersionMax)
+                .toExtensions(repo.substringBeforeLast('/') + '/', isSupportedLibVersion)
         }
     }
 
@@ -91,13 +101,12 @@ object ExtensionGithubApi {
 
     private fun List<ExtensionJsonObject>.toExtensions(
         repo: String,
-        libVersionMin: Double,
-        libVersionMax: Double,
+        isSupportedLibVersion: (Double) -> Boolean,
     ): List<OnlineExtension> =
         this
             .filter {
-                val libVersion = it.version.substringBeforeLast('.').toDouble()
-                libVersion in libVersionMin..libVersionMax
+                val libVersion = it.version.substringBeforeLast('.').toDoubleOrNull()
+                libVersion != null && isSupportedLibVersion(libVersion)
             }.map {
                 OnlineExtension(
                     repo = repo,

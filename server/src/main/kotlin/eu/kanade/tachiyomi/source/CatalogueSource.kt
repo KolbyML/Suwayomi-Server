@@ -17,6 +17,27 @@ interface CatalogueSource : Source {
      */
     override val lang: String
 
+    /** Whether this source provides its own related-manga list. */
+    val supportsRelatedMangas: Boolean
+        get() = false
+
+    /** Whether the host should avoid augmenting related manga through search. */
+    val disableRelatedMangasBySearch: Boolean
+        get() = false
+
+    /** Whether the host should suppress related manga entirely. */
+    val disableRelatedMangas: Boolean
+        get() = false
+
+    /**
+     * Fetch related manga supplied by the source.
+     *
+     * Added to the extension ABI in 1.6. Sources that do not advertise support retain the
+     * default unsupported behavior.
+     */
+    suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> =
+        throw UnsupportedOperationException("Unsupported!")
+
     @Suppress("DEPRECATION")
     override suspend fun getPopularManga(page: Int): MangasPage = fetchPopularManga(page).awaitSingle()
 

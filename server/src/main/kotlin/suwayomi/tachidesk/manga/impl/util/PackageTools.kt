@@ -49,8 +49,8 @@ object PackageTools {
     const val METADATA_SOURCE_CLASS = "tachiyomi.extension.class"
     const val METADATA_SOURCE_FACTORY = "tachiyomi.extension.factory"
     const val METADATA_NSFW = "tachiyomi.extension.nsfw"
-    const val LIB_VERSION_MIN = 1.3
-    const val LIB_VERSION_MAX = 1.5
+    const val METADATA_EXTENSION_LIB = "tachiyomix.extensionLib"
+    val SUPPORTED_LIB_VERSIONS = setOf(1.4, 1.6)
     internal const val CONVERTER_VERSION = "dex-register-constructors-v1"
     private const val ANIME_METADATA_SOURCE_CLASS = "tachiyomi.animeextension.class"
     private const val ANIME_METADATA_SOURCE_FACTORY = "tachiyomi.animeextension.factory"
@@ -259,6 +259,33 @@ object PackageTools {
                     .map { Signature(it.data) }
                     .toTypedArray()
         }
+    }
+
+    /**
+     * Return the extension API version declared by the package.
+     *
+     * Current packages declare this independently from their release version. Older packages only
+     * encoded it in the first two components of versionName, so retain that as a compatibility
+     * fallback.
+     */
+    internal fun extensionLibVersion(packageInfo: PackageInfo): Double? =
+        packageInfo.applicationInfo.metaData
+            ?.get(METADATA_EXTENSION_LIB)
+            ?.toString()
+            ?.toDoubleOrNull()
+            ?: packageInfo.versionName
+                ?.substringBeforeLast('.')
+                ?.toDoubleOrNull()
+
+    internal fun requireSupportedExtensionLibVersion(packageInfo: PackageInfo): Double {
+        val libVersion = extensionLibVersion(packageInfo)
+        if (libVersion == null || libVersion !in SUPPORTED_LIB_VERSIONS) {
+            throw ExtensionCompatibilityException(
+                "extension API version is ${libVersion ?: "missing"}; supported versions are " +
+                    SUPPORTED_LIB_VERSIONS.sorted().joinToString(),
+            )
+        }
+        return libVersion
     }
 
     fun deriveExtensionClassName(

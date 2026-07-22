@@ -5,9 +5,14 @@ import com.googlecode.d2j.dex.Dex2jar
 import com.googlecode.d2j.reader.MultiDexFileReader
 import com.googlecode.dex2jar.tools.BaksmaliBaseDexExceptionHandler
 import eu.kanade.tachiyomi.network.NetworkHelper
+import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
+import eu.kanade.tachiyomi.network.interceptor.UncaughtExceptionInterceptor
+import eu.kanade.tachiyomi.network.interceptor.UserAgentInterceptor
 import eu.kanade.tachiyomi.source.Source
 import eu.kanade.tachiyomi.source.SourceFactory
+import io.mockk.every
 import io.mockk.mockk
+import okhttp3.OkHttpClient
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -37,6 +42,7 @@ class ExtensionConversionCorpusTest {
         assumeTrue(corpus.isNotEmpty(), "set -Dmanatan.extension.corpus to run the real APK corpus")
 
         corpus.forEachIndexed { index, apk ->
+            PackageTools.requireSupportedExtensionLibVersion(PackageTools.getPackageInfo(apk.toString()))
             val output = tempDir.resolve("corpus-$index.jar")
             PackageTools.convertDexBytes(
                 Files.readAllBytes(apk),
@@ -46,6 +52,28 @@ class ExtensionConversionCorpusTest {
             assertTrue(Files.size(output) > 0, "empty converted JAR for $apk")
             loadExtensionEntryPoint(apk, output)
         }
+    }
+
+    @Test
+    fun `reproduces Pawchive current API and verifies converted output`() {
+        val apk =
+            (System.getProperty("manatan.pawchive.apk") ?: System.getenv("MANATAN_PAWCHIVE_APK"))
+                ?.takeIf(String::isNotBlank)
+                ?.let(Path::of)
+        assumeTrue(apk != null && Files.isRegularFile(apk), "set -Dmanatan.pawchive.apk to the Pawchive APK")
+        val apkPath = requireNotNull(apk)
+
+        val packageInfo = PackageTools.getPackageInfo(apkPath.toString())
+        assertTrue(PackageTools.requireSupportedExtensionLibVersion(packageInfo) == 1.6)
+
+        val output = tempDir.resolve("pawchive.jar")
+        PackageTools.convertDexBytes(
+            Files.readAllBytes(apkPath),
+            output,
+            tempDir.resolve("pawchive-errors.txt"),
+        )
+        PackageTools.verifyConvertedJar(output)
+        loadExtensionEntryPoint(apkPath, output)
     }
 
     @Test
@@ -108,7 +136,17 @@ class ExtensionConversionCorpusTest {
                 modules(
                     module {
                         single<Application> { mockk(relaxed = true) }
-                        single<NetworkHelper> { mockk(relaxed = true) }
+                        single<NetworkHelper> {
+                            mockk<NetworkHelper>().also { network ->
+                                every { network.client } returns
+                                    OkHttpClient
+                                        .Builder()
+                                        .addInterceptor(UncaughtExceptionInterceptor())
+                                        .addInterceptor(UserAgentInterceptor { "Manatan test" })
+                                        .addInterceptor(CloudflareInterceptor({}, {}))
+                                        .build()
+                            }
+                        }
                     },
                 )
             }

@@ -290,6 +290,24 @@ abstract class HttpSource : CatalogueSource {
     protected open fun mangaDetailsParse(response: Response): SManga = throw UnsupportedOperationException()
 
     /**
+     * HTTP sources can derive related manga from their details response unless they opt out.
+     * This is part of the 1.6 extension ABI.
+     */
+    override val supportsRelatedMangas: Boolean
+        get() = true
+
+    override suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> =
+        client
+            .newCall(relatedMangaListRequest(manga))
+            .awaitSuccess()
+            .use(::relatedMangaListParse)
+
+    protected open fun relatedMangaListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
+
+    protected open fun relatedMangaListParse(response: Response): List<SManga> =
+        popularMangaParse(response).mangas
+
+    /**
      * Returns an observable with the updated chapter list for a manga. Normally it's not needed to
      * override this method.
      *

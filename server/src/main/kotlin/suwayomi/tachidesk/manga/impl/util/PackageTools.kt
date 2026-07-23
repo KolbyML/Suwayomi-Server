@@ -51,7 +51,7 @@ object PackageTools {
     const val METADATA_NSFW = "tachiyomi.extension.nsfw"
     const val METADATA_EXTENSION_LIB = "tachiyomix.extensionLib"
     val SUPPORTED_LIB_VERSIONS = setOf(1.4, 1.6)
-    internal const val CONVERTER_VERSION = "dex-register-constructors-v1"
+    internal const val CONVERTER_VERSION = "dex-register-constructors-v2"
     private const val ANIME_METADATA_SOURCE_CLASS = "tachiyomi.animeextension.class"
     private const val ANIME_METADATA_SOURCE_FACTORY = "tachiyomi.animeextension.factory"
 

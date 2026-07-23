@@ -13,7 +13,9 @@ import eu.kanade.tachiyomi.source.SourceFactory
 import io.mockk.every
 import io.mockk.mockk
 import okhttp3.OkHttpClient
-import org.junit.jupiter.api.Assertions.assertNotNull
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -117,14 +119,38 @@ class ExtensionConversionCorpusTest {
         PackageTools.convertDexBytes(bytes, output, tempDir.resolve("rawkuma-errors.txt"))
         PackageTools.verifyConvertedJar(output)
 
-        val packageInfo = PackageTools.getPackageInfo(apk.toString())
-        val className =
-            packageInfo.packageName +
-                packageInfo.applicationInfo.metaData.getString(PackageTools.METADATA_SOURCE_CLASS)
-        ChildFirstURLClassLoader(arrayOf(output.toUri().toURL())).use { loader ->
-            val entryClass = loader.loadOwnClassAndResolve(className)
-            withExtensionDependencies {
-                assertNotNull(entryClass.getDeclaredConstructor().newInstance())
+        loadExtensionEntryPoint(apk, output) { sources ->
+            sources.forEach { source ->
+                assertTrue(
+                    source.getFilterList().isNotEmpty(),
+                    "Rawkuma did not construct its search filters",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `reproduces MangaFire optimized filter subclasses and constructs filters`() {
+        val apk =
+            (System.getProperty("manatan.mangafire.apk") ?: System.getenv("MANATAN_MANGAFIRE_APK"))
+                ?.takeIf(String::isNotBlank)
+                ?.let(Path::of)
+        assumeTrue(apk != null && Files.isRegularFile(apk), "set -Dmanatan.mangafire.apk to the MangaFire APK")
+        val apkPath = requireNotNull(apk)
+
+        val output = tempDir.resolve("mangafire.jar")
+        PackageTools.convertDexBytes(
+            Files.readAllBytes(apkPath),
+            output,
+            tempDir.resolve("mangafire-errors.txt"),
+        )
+        PackageTools.verifyConvertedJar(output)
+        loadExtensionEntryPoint(apkPath, output) { sources ->
+            sources.forEach { source ->
+                assertTrue(
+                    source.getFilterList().isNotEmpty(),
+                    "MangaFire did not construct its search filters",
+                )
             }
         }
     }
@@ -138,9 +164,20 @@ class ExtensionConversionCorpusTest {
                         single<Application> { mockk(relaxed = true) }
                         single<NetworkHelper> {
                             mockk<NetworkHelper>().also { network ->
+                                every { network.defaultUserAgentProvider() } returns "Manatan test"
                                 every { network.client } returns
                                     OkHttpClient
                                         .Builder()
+                                        .addInterceptor { chain ->
+                                            Response
+                                                .Builder()
+                                                .request(chain.request())
+                                                .protocol(Protocol.HTTP_1_1)
+                                                .code(503)
+                                                .message("Offline corpus test")
+                                                .body("".toResponseBody())
+                                                .build()
+                                        }
                                         .addInterceptor(UncaughtExceptionInterceptor())
                                         .addInterceptor(UserAgentInterceptor { "Manatan test" })
                                         .addInterceptor(CloudflareInterceptor({}, {}))
@@ -161,6 +198,7 @@ class ExtensionConversionCorpusTest {
     private fun loadExtensionEntryPoint(
         apk: Path,
         jar: Path,
+        validate: (List<Source>) -> Unit = {},
     ) {
         val packageInfo = PackageTools.getPackageInfo(apk.toString())
         val className =
@@ -180,6 +218,7 @@ class ExtensionConversionCorpusTest {
                         else -> error("unsupported extension entry point ${instance.javaClass.name} for $apk")
                     }
                 assertTrue(sources.isNotEmpty(), "extension created no sources for $apk")
+                validate(sources)
             }
         }
     }
